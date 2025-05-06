@@ -2,11 +2,12 @@
 .SYNOPSIS
 A PowerShell script with a GUI to fetch Entra ID sign-in logs for selected users,
 and export to CSV, expanding complex properties like Status and DeviceDetail. Filters logs by User ID for better reliability.
-Users are loaded automatically upon successful connection to Microsoft Graph.
+Users are loaded automatically upon successful connection to Microsoft Graph. Includes a disconnect button.
 
 .DESCRIPTION
 This script provides a Windows Forms interface to:
 - Connect to Microsoft Graph (and automatically load Entra ID users).
+- Disconnect the Microsoft Graph session.
 - Select users for investigation.
 - Select the duration (1-30 days) for sign-in log history, with license warnings.
 - Select an output folder.
@@ -16,7 +17,7 @@ This script provides a Windows Forms interface to:
 .NOTES
 Author: Gemini
 Date: 2025-05-06
-Version: 2.0 (Users now load automatically after connecting to Graph; removed separate 'Load Users' button)
+Version: 2.1 (Added 'Disconnect from Graph' button)
 Requires: PowerShell 5.1+, Microsoft Graph SDK (Users, Reports).
 Permissions: Requires delegated User.Read.All and AuditLog.Read.All permissions in Entra ID.
 
@@ -103,28 +104,25 @@ $mainForm.Controls.Add($statusStrip)
 # Connect Button
 $connectButton = New-Object System.Windows.Forms.Button
 $connectButton.Location = New-Object System.Drawing.Point(20, 20)
-$connectButton.Size = New-Object System.Drawing.Size(200, 30) # Made button wider
-$connectButton.Text = "Connect & Load Users"       # Updated Text
+$connectButton.Size = New-Object System.Drawing.Size(160, 30) # Adjusted size
+$connectButton.Text = "Connect & Load Users"
 $connectButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
 $connectButton.add_Click({
     param($sender, $e)
     $statusLabel.Text = "Connecting to Microsoft Graph..."
     $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-    $userCheckedListBox.Items.Clear() # Clear previous user list
-    $getLogsButton.Enabled = $false   # Disable get logs button initially
+    $userCheckedListBox.Items.Clear()
+    $getLogsButton.Enabled = $false
 
     try {
-        # --- Connect to Graph ---
         Disconnect-MgGraph -ErrorAction SilentlyContinue
         Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
         $context = Get-MgContext
         $statusLabel.Text = "Connected as $($context.Account). Tenant: $($context.TenantId). Loading users..."
-        $mainForm.Refresh() # Ensure status update is visible
+        $mainForm.Refresh()
         Write-Host "Successfully connected to Microsoft Graph." -ForegroundColor Green
 
-        # --- Load Users (Moved here) ---
         Write-Host "Loading users..."
-        # Fetch users - Use -All for complete list, but be mindful of performance
         $users = Get-MgUser -All -ErrorAction Stop -Select UserPrincipalName, Id, DisplayName -ConsistencyLevel eventual | Sort-Object UserPrincipalName
         
         if ($users) {
@@ -133,23 +131,55 @@ $connectButton.add_Click({
             }
             $statusLabel.Text = "Connected. Loaded $($users.Count) users. Select users to investigate."
             Write-Host "Loaded $($users.Count) users." -ForegroundColor Green
-            # $getLogsButton can be enabled if an output folder is already selected, handled by its own logic
         } else {
             $statusLabel.Text = "Connected. No users found or error loading users."
             [System.Windows.Forms.MessageBox]::Show("Connected to Graph, but no users found in the tenant or an error occurred during user loading.", "No Users Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
         }
+        $disconnectButton.Enabled = $true # Enable disconnect button after successful connection
 
     } catch {
         $statusLabel.Text = "Operation failed. Check console for errors."
         Write-Error "Microsoft Graph connection or user loading failed: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show("Failed to connect to Microsoft Graph or load users. Ensure you have internet connectivity and the necessary permissions. `n`nError: $($_.Exception.Message)", "Connection/Load Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        $disconnectButton.Enabled = $false # Ensure disconnect is disabled if connection fails
     } finally {
         $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
-        # Check if getLogsButton should be enabled based on current state
         $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
     }
 })
 $mainForm.Controls.Add($connectButton)
+
+# Disconnect Button
+$disconnectButton = New-Object System.Windows.Forms.Button
+$disconnectButton.Location = New-Object System.Drawing.Point(190, 20) # Positioned next to connect button
+$disconnectButton.Size = New-Object System.Drawing.Size(160, 30)    # Adjusted size
+$disconnectButton.Text = "Disconnect from Graph"
+$disconnectButton.Enabled = $false # Initially disabled
+$disconnectButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
+$disconnectButton.add_Click({
+    param($sender, $e)
+    $statusLabel.Text = "Disconnecting from Microsoft Graph..."
+    $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue # Silently continue if not connected
+        Write-Host "Disconnected from Microsoft Graph." -ForegroundColor Green
+        $userCheckedListBox.Items.Clear()
+        $getLogsButton.Enabled = $false
+        $statusLabel.Text = "Disconnected. Ready to connect."
+        $disconnectButton.Enabled = $false # Disable itself after disconnecting
+        $connectButton.Enabled = $true # Ensure connect button is enabled
+    } catch {
+        $statusLabel.Text = "Error during disconnection. Check console."
+        Write-Error "Error disconnecting from Microsoft Graph: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("An error occurred while trying to disconnect.`n`nError: $($_.Exception.Message)", "Disconnection Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        # Even if disconnect fails, try to reset state
+        $disconnectButton.Enabled = $true # Keep enabled if error
+    } finally {
+        $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
+    }
+})
+$mainForm.Controls.Add($disconnectButton)
+
 
 # User List Label
 $userListLabel = New-Object System.Windows.Forms.Label
@@ -167,7 +197,7 @@ $userCheckedListBox.CheckOnClick = $true
 $userCheckedListBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $userCheckedListBox.add_ItemCheck({
     $mainForm.BeginInvoke([System.Action]{
-        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
+        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled) # Also check if connected
     })
 })
 $mainForm.Controls.Add($userCheckedListBox)
@@ -223,7 +253,7 @@ $outputFolderTextBox.Size = New-Object System.Drawing.Size(345, 25)
 $outputFolderTextBox.ReadOnly = $true
 $outputFolderTextBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $outputFolderTextBox.add_TextChanged({
-    $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
+    $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled) # Also check if connected
 })
 $mainForm.Controls.Add($outputFolderTextBox)
 
@@ -240,8 +270,7 @@ $browseFolderButton.add_Click({
     if ($folderBrowserDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $outputFolderTextBox.Text = $folderBrowserDialog.SelectedPath
         $statusLabel.Text = "Output folder selected: $($outputFolderTextBox.Text)"
-        # Enable Get Logs button if users are also selected
-        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
+        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled) # Also check if connected
     }
 })
 $mainForm.Controls.Add($browseFolderButton)
@@ -278,8 +307,8 @@ $getLogsButton.add_Click({
     $statusLabel.Text = "Fetching logs for $($selectedUpns.Count) users (Last $days days)..."
     $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     $getLogsButton.Enabled = $false
-    # $loadUsersButton.Enabled = $false # Button removed
-    $connectButton.Enabled = $false # Disable connect button during log fetch
+    $connectButton.Enabled = $false 
+    $disconnectButton.Enabled = $false # Disable disconnect during log fetch
     $logDurationNumericUpDown.Enabled = $false
 
     $allLogs = @()
@@ -378,9 +407,9 @@ $getLogsButton.add_Click({
         $errorOccurred = $true
     } finally {
         $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
-        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
-        # $loadUsersButton.Enabled = $true # Button removed
-        $connectButton.Enabled = $true   # Re-enable connect button
+        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled) # Enable if connected and items selected
+        $connectButton.Enabled = $true   
+        $disconnectButton.Enabled = $true # Re-enable disconnect button if it was enabled before log fetch
         $logDurationNumericUpDown.Enabled = $true
         if ($errorOccurred) {
              $statusLabel.Text = "Operation finished with errors. Check console/messages."
