@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
 A PowerShell script with a GUI to fetch Entra ID sign-in logs for selected users,
-and export to CSV, expanding complex properties. Includes tenant domain in the filename
-(with UPN fallback). Users are loaded automatically upon successful connection. Includes a disconnect button.
+and export to a formatted XLSX file. Filters logs by User ID for better reliability.
+Users are loaded automatically upon successful connection. Includes a disconnect button.
 
 .DESCRIPTION
 This script provides a Windows Forms interface to:
@@ -12,14 +12,20 @@ This script provides a Windows Forms interface to:
 - Select the duration (1-30 days) for sign-in log history, with license warnings.
 - Select an output folder.
 - Fetch sign-in logs for the selected users (using User ID filter) and duration.
-- Export logs directly to CSV format, with expanded Status and DeviceDetail properties.
-- The CSV filename will include the tenant's primary domain name (attempts Get-MgOrganization, then UPN parsing, then Tenant ID).
+- Export logs directly to CSV format, then convert to XLSX and apply formatting:
+    - Auto-fit columns.
+    - Bold header row.
+    - Highlight rows yellow where Country *is* 'United States'. (Highlighting logic reversed)
+- The XLSX filename will include the tenant's primary domain name.
 
 .NOTES
 Author: Gemini
 Date: 2025-05-06
-Version: 2.5 (Corrected Add_Shown event handler typo)
-Requires: PowerShell 5.1+, Microsoft Graph SDK (Users, Reports, Identity.DirectoryManagement).
+Version: 3.3 (Reversed highlighting logic to highlight US rows instead of non-US rows)
+Requires:
+    - PowerShell 5.1+
+    - Microsoft Graph SDK (Users, Reports, Identity.DirectoryManagement)
+    - *** Microsoft Excel Installed *** (for XLSX conversion and formatting)
 Permissions: Requires delegated User.Read.All, AuditLog.Read.All, and Organization.Read.All permissions in Entra ID.
 
 .LINK
@@ -34,6 +40,7 @@ Install Modules: Install-Module Microsoft.Graph.Users, Microsoft.Graph.Reports, 
 # --- Configuration ---
 $requiredModules = @("Microsoft.Graph.Users", "Microsoft.Graph.Reports", "Microsoft.Graph.Identity.DirectoryManagement")
 $requiredScopes = @("User.Read.All", "AuditLog.Read.All", "Organization.Read.All")
+$highlightColorIndexYellow = 6 # Excel ColorIndex for Yellow
 
 # Script-level variable to store tenant domain
 $script:tenantDomainNameForFile = $null
@@ -64,6 +71,155 @@ Function Install-MissingModules {
         }
     }
 }
+
+Function ConvertTo-XlsxAndFormat {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$CsvPath,
+        [Parameter(Mandatory=$true)]
+        [string]$XlsxPath,
+        [Parameter(Mandatory=$false)]
+        [int]$HighlightColor = $highlightColorIndexYellow,
+        [Parameter(Mandatory=$false)]
+        [string]$CountryColumnHeader = "Country",
+        # Changed parameter name slightly for clarity
+        [Parameter(Mandatory=$false)]
+        [string]$CountryToHighlight = "United States" 
+    )
+
+    $excel = $null
+    $workbook = $null
+    $worksheet = $null
+    $usedRange = $null
+    $columns = $null
+    $rows = $null
+    $headerRange = $null
+    $countryColumnObject = $null
+    $countryColumnIndex = $null
+
+    # Excel Constants
+    $xlOpenXMLWorkbook = 51 # FileFormat for .xlsx
+    $xlFormulas = -4123    # LookIn constant for Find
+    $xlWhole = 1           # LookAt constant for Find
+    $xlByRows = 1          # SearchOrder constant
+    $xlNext = 1            # SearchDirection constant
+    $missing = [System.Reflection.Missing]::Value # For optional COM parameters
+
+    # Check if Excel is installed by trying to create the object
+    try {
+        $excel = New-Object -ComObject Excel.Application -ErrorAction Stop
+    } catch {
+        Write-Error "Failed to create Excel COM object. Ensure Microsoft Excel is installed and accessible. Error: $($_.Exception.Message)"
+        if ($statusLabel) { $statusLabel.Text = "Error: Excel not found or accessible." }
+        return $false # Indicate failure
+    }
+
+    try {
+        $excel.Visible = $false         # Keep Excel hidden
+        $excel.DisplayAlerts = $false   # Don't show Excel prompts
+
+        Write-Host "Converting '$CsvPath' to '$XlsxPath'..."
+        # Open CSV and save as XLSX
+        $workbook = $excel.Workbooks.Open($CsvPath)
+        $workbook.SaveAs($XlsxPath, $xlOpenXMLWorkbook)
+        $workbook.Close($false) # Close the CSV representation
+        Write-Host "Initial conversion successful. Now formatting..." -ForegroundColor Green
+
+        # Re-open the XLSX for formatting
+        $workbook = $excel.Workbooks.Open($XlsxPath)
+        $worksheet = $workbook.Worksheets.Item(1) # Get the first sheet
+        $usedRange = $worksheet.UsedRange
+        $columns = $usedRange.Columns
+        $rows = $usedRange.Rows
+
+        if ($usedRange.Rows.Count -gt 0) {
+            # --- AutoFit Columns ---
+            Write-Host " - Autofitting columns..."
+            $columns.AutoFit() | Out-Null
+
+             # --- Bold Header Row ---
+            Write-Host " - Bolding header row..."
+            $headerRange = $worksheet.Rows.Item(1)
+            $headerRange.Font.Bold = $true
+
+            # --- Highlight Rows where Country IS $CountryToHighlight (if more than header exists) ---
+            if ($usedRange.Rows.Count -gt 1) {
+                Write-Host " - Searching for '$CountryColumnHeader' column..."
+                # Using [System.Reflection.Missing]::Value for optional parameters
+                $countryColumnObject = $headerRange.Find(
+                    $CountryColumnHeader, # What
+                    $missing,             # After
+                    $xlFormulas,          # LookIn
+                    $xlWhole,             # LookAt
+                    $xlByRows,            # SearchOrder
+                    $xlNext,              # SearchDirection
+                    $false,               # MatchCase
+                    $missing,             # MatchByte
+                    $missing              # SearchFormat
+                )
+
+                if ($countryColumnObject) {
+                    $countryColumnIndex = $countryColumnObject.Column
+                    Write-Host "   - '$CountryColumnHeader' column found at index $countryColumnIndex. Highlighting rows where country is '$CountryToHighlight'..."
+                    # Iterate through data rows
+                    for ($i = 2; $i -le $rows.Count; $i++) {
+                        $cell = $null; $rowRange = $null
+                        try {
+                            $cell = $worksheet.Cells.Item($i, $countryColumnIndex)
+                            $countryValue = $cell.Value2
+                            # --- MODIFIED CONDITION: Highlight if country IS the specified value ---
+                            if ($countryValue -and ($countryValue -as [string]).Trim() -ne '' -and ($countryValue -as [string]).Equals($CountryToHighlight, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                # Highlight the entire row
+                                $rowRange = $worksheet.Rows.Item($i)
+                                $rowRange.Interior.ColorIndex = $HighlightColor
+                            }
+                        } finally {
+                            # Release cell and row COM objects within the loop
+                            if ($cell) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($cell) | Out-Null }
+                            if ($rowRange) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($rowRange) | Out-Null }
+                        }
+                    }
+                    Write-Host "   - Highlighting complete." -ForegroundColor Green
+                } else {
+                    Write-Warning "   - Could not find the '$CountryColumnHeader' column header. Skipping row highlighting."
+                }
+             } else {
+                 Write-Host " - Only header row found, skipping row highlighting."
+             }
+        } else {
+             Write-Host " - Worksheet appears empty, skipping formatting."
+        }
+
+
+        # Save the changes to the XLSX file
+        Write-Host "Saving formatted XLSX file..."
+        $workbook.Save()
+        $workbook.Close()
+        Write-Host "XLSX formatting complete." -ForegroundColor Green
+
+    } catch {
+        Write-Error "Failed during Excel formatting or conversion. Error: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
+        if ($statusLabel) { $statusLabel.Text = "Error: Failed during XLSX conversion/formatting." }
+        # Attempt to close workbook even if error occurred during formatting
+        try { if ($workbook -ne $null) { $workbook.Close($false) } } catch {}
+        return $false # Indicate failure
+    } finally {
+        # Clean up COM objects meticulously
+        if ($countryColumnObject) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($countryColumnObject) | Out-Null }
+        if ($headerRange) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($headerRange) | Out-Null }
+        if ($columns) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($columns) | Out-Null }
+        if ($rows) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($rows) | Out-Null }
+        if ($usedRange) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($usedRange) | Out-Null }
+        if ($worksheet) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($worksheet) | Out-Null }
+        if ($workbook) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($workbook) | Out-Null } # Already closed in try/catch, just release
+        if ($excel) { $excel.Quit(); [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null }
+        # Force garbage collection
+        [gc]::Collect(); [gc]::WaitForPendingFinalizers()
+        Write-Host "COM cleanup finished."
+    }
+    return $true # Indicate success
+}
+
 
 # --- Check Prerequisites ---
 $missing = Test-Modules -Modules $requiredModules
@@ -138,8 +294,6 @@ $connectButton.add_Click({
             if ($orgDetails -and $orgDetails.Count -gt 0) {
                 $currentOrg = $orgDetails[0]
                 Write-Host "Organization DisplayName: $($currentOrg.DisplayName)"
-                # Write-Host "Verified Domains object from Graph:" # Optional: Keep for deep debugging
-                # $currentOrg.VerifiedDomains | Format-Table -AutoSize | Out-String | Write-Host
 
                 if ($currentOrg.VerifiedDomains) {
                     $defaultDomain = $currentOrg.VerifiedDomains | Where-Object {$_.IsDefault -eq $true} | Select-Object -ExpandProperty Name -First 1
@@ -384,25 +538,25 @@ $getLogsButton.add_Click({
 
     $allLogs = @()
     $errorOccurred = $false
+    $csvExported = $false # Flag to track if CSV was created
 
     try {
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         # --- Use Tenant Domain for Filename ---
-        $safeTenantDomain = "UnknownTenant" # Default if not found or if it's a GUID
+        $safeTenantDomain = "UnknownTenant"
         if ($script:tenantDomainNameForFile) {
-            # Check if it looks like a GUID (common for TenantID fallback)
             if ($script:tenantDomainNameForFile -match "^\w{8}-\w{4}-\w{4}-\w{4}-\w{12}$") {
-                $safeTenantDomain = $script:tenantDomainNameForFile # Keep GUID as is if it's the fallback
+                $safeTenantDomain = $script:tenantDomainNameForFile
             } else {
-                # Sanitize domain name for filename
                 $safeTenantDomain = $script:tenantDomainNameForFile -replace "[^a-zA-Z0-9_.-]", "" -replace "\.", "_" 
             }
         }
         $baseFileName = "EntraSignInLogs_$($safeTenantDomain)_$timestamp"
         $csvFilePath = Join-Path -Path $outputFolder -ChildPath "$($baseFileName).csv"
+        $xlsxFilePath = Join-Path -Path $outputFolder -ChildPath "$($baseFileName).xlsx" # Define XLSX path
 
         Write-Host "Fetching logs starting from $startDate for users: $($selectedUpns -join ', ')"
-        Write-Host "Output file will be: $csvFilePath"
+        Write-Host "Output file will be: $xlsxFilePath (via $csvFilePath)"
 
         $totalUsers = $selectedUpns.Count
         $currentUserIndex = 0
@@ -474,13 +628,31 @@ $getLogsButton.add_Click({
 
             try {
                  $exportData | Export-Csv -Path $csvFilePath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
-                 $statusLabel.Text = "Successfully exported $($allLogs.Count) logs to $csvFilePath"
-                 [System.Windows.Forms.MessageBox]::Show("Successfully exported $($allLogs.Count) sign-in log entries to CSV:`n$csvFilePath", "CSV Export Successful", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                 Write-Host "Successfully exported data to temporary CSV: $csvFilePath" -ForegroundColor Green
+                 $csvExported = $true
             } catch {
                  Write-Error "Failed to export data to CSV '$csvFilePath'. Error: $($_.Exception.Message)"
                  $statusLabel.Text = "Error exporting data to CSV. Check console."
                  [System.Windows.Forms.MessageBox]::Show("Failed to export data to CSV. Please check file permissions and console for errors.`n`nError: $($_.Exception.Message)", "CSV Export Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
                  $errorOccurred = $true
+            }
+
+            # --- Convert and Format if CSV export was successful ---
+            if ($csvExported) {
+                $statusLabel.Text = "Converting CSV to XLSX and formatting..."
+                Write-Host "Attempting conversion to XLSX format and applying formatting..."
+                # Pass the correct Country value to highlight
+                if (ConvertTo-XlsxAndFormat -CsvPath $csvFilePath -XlsxPath $xlsxFilePath -CountryColumnHeader "Country" -CountryToHighlight "United States") {
+                    $statusLabel.Text = "Successfully exported and formatted $($allLogs.Count) logs to $xlsxFilePath"
+                    [System.Windows.Forms.MessageBox]::Show("Successfully exported $($allLogs.Count) sign-in log entries and formatted the file:`n$xlsxFilePath", "XLSX Export Successful", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                    # Optional: Clean up temporary CSV
+                    try { Remove-Item -Path $csvFilePath -Force -ErrorAction SilentlyContinue } catch {}
+                } else {
+                    # Conversion/Formatting failed, message already shown by ConvertTo-XlsxAndFormat
+                    $statusLabel.Text = "Exported to CSV ($csvFilePath), but XLSX conversion/formatting failed."
+                    [System.Windows.Forms.MessageBox]::Show("Log data exported successfully to CSV:`n$csvFilePath`n`nHowever, conversion to XLSX or formatting failed. Please ensure Excel is installed or check console for errors.", "CSV Exported, XLSX Failed/Formatting Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                    $errorOccurred = $true
+                }
             }
         }
     } catch {
@@ -497,17 +669,22 @@ $getLogsButton.add_Click({
         if ($errorOccurred) {
              $statusLabel.Text = "Operation finished with errors. Check console/messages."
         } elseif ($allLogs.Count -gt 0) {
-             # Status label already shows CSV success message
+             # Status label already shows success/failure message from export/convert step
         } else {
              # Status label already shows 'No logs found' or error message
+        }
+        # Clean up temporary CSV if it still exists and XLSX failed
+        if ($csvExported -and $errorOccurred -and (Test-Path $csvFilePath)) {
+             Write-Host "Cleaning up temporary CSV file ($csvFilePath) as XLSX conversion failed."
+             # Keep the CSV in case of failure for manual processing
+             # try { Remove-Item -Path $csvFilePath -Force -ErrorAction SilentlyContinue } catch {}
         }
     }
 })
 $mainForm.Controls.Add($getLogsButton)
 
 # --- Show Form ---
-# Corrected Add_Shown (single underscore)
-$mainForm.Add_Shown({$mainForm.Activate()}) # Bring form to front
+$mainForm.Add_Shown({$mainForm.Activate()}) # Corrected: Single underscore
 [void]$mainForm.ShowDialog()
 
 # --- Script End ---
