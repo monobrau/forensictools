@@ -1,8 +1,7 @@
 <#
 .SYNOPSIS
 A PowerShell script with a GUI to fetch Entra ID sign-in logs for selected users,
-and export to a formatted XLSX file. Filters logs by User ID for better reliability.
-Users are loaded automatically upon successful connection. Includes a disconnect button.
+and export to a formatted XLSX file. Includes a button to open the last exported file.
 
 .DESCRIPTION
 This script provides a Windows Forms interface to:
@@ -15,13 +14,14 @@ This script provides a Windows Forms interface to:
 - Export logs directly to CSV format, then convert to XLSX and apply formatting:
     - Auto-fit columns.
     - Bold header row.
-    - Highlight rows yellow where Country *is* 'United States'. (Highlighting logic reversed)
+    - Highlight rows yellow where Country *is* 'United States'.
 - The XLSX filename will include the tenant's primary domain name.
+- Provides a button to open the last successfully exported XLSX file.
 
 .NOTES
 Author: Gemini
 Date: 2025-05-06
-Version: 3.3 (Reversed highlighting logic to highlight US rows instead of non-US rows)
+Version: 3.4 (Added 'Open Last Exported File' button)
 Requires:
     - PowerShell 5.1+
     - Microsoft Graph SDK (Users, Reports, Identity.DirectoryManagement)
@@ -42,8 +42,9 @@ $requiredModules = @("Microsoft.Graph.Users", "Microsoft.Graph.Reports", "Micros
 $requiredScopes = @("User.Read.All", "AuditLog.Read.All", "Organization.Read.All")
 $highlightColorIndexYellow = 6 # Excel ColorIndex for Yellow
 
-# Script-level variable to store tenant domain
+# Script-level variables
 $script:tenantDomainNameForFile = $null
+$script:lastExportedXlsxPath = $null # To store the path of the last exported XLSX file
 
 # --- Function Definitions ---
 
@@ -82,7 +83,6 @@ Function ConvertTo-XlsxAndFormat {
         [int]$HighlightColor = $highlightColorIndexYellow,
         [Parameter(Mandatory=$false)]
         [string]$CountryColumnHeader = "Country",
-        # Changed parameter name slightly for clarity
         [Parameter(Mandatory=$false)]
         [string]$CountryToHighlight = "United States" 
     )
@@ -98,83 +98,72 @@ Function ConvertTo-XlsxAndFormat {
     $countryColumnIndex = $null
 
     # Excel Constants
-    $xlOpenXMLWorkbook = 51 # FileFormat for .xlsx
-    $xlFormulas = -4123    # LookIn constant for Find
-    $xlWhole = 1           # LookAt constant for Find
-    $xlByRows = 1          # SearchOrder constant
-    $xlNext = 1            # SearchDirection constant
-    $missing = [System.Reflection.Missing]::Value # For optional COM parameters
+    $xlOpenXMLWorkbook = 51 
+    $xlFormulas = -4123    
+    $xlWhole = 1           
+    $xlByRows = 1          
+    $xlNext = 1            
+    $missing = [System.Reflection.Missing]::Value 
 
-    # Check if Excel is installed by trying to create the object
     try {
         $excel = New-Object -ComObject Excel.Application -ErrorAction Stop
     } catch {
         Write-Error "Failed to create Excel COM object. Ensure Microsoft Excel is installed and accessible. Error: $($_.Exception.Message)"
         if ($statusLabel) { $statusLabel.Text = "Error: Excel not found or accessible." }
-        return $false # Indicate failure
+        return $false 
     }
 
     try {
-        $excel.Visible = $false         # Keep Excel hidden
-        $excel.DisplayAlerts = $false   # Don't show Excel prompts
+        $excel.Visible = $false         
+        $excel.DisplayAlerts = $false   
 
         Write-Host "Converting '$CsvPath' to '$XlsxPath'..."
-        # Open CSV and save as XLSX
         $workbook = $excel.Workbooks.Open($CsvPath)
         $workbook.SaveAs($XlsxPath, $xlOpenXMLWorkbook)
-        $workbook.Close($false) # Close the CSV representation
+        $workbook.Close($false) 
         Write-Host "Initial conversion successful. Now formatting..." -ForegroundColor Green
 
-        # Re-open the XLSX for formatting
         $workbook = $excel.Workbooks.Open($XlsxPath)
-        $worksheet = $workbook.Worksheets.Item(1) # Get the first sheet
+        $worksheet = $workbook.Worksheets.Item(1) 
         $usedRange = $worksheet.UsedRange
         $columns = $usedRange.Columns
         $rows = $usedRange.Rows
 
         if ($usedRange.Rows.Count -gt 0) {
-            # --- AutoFit Columns ---
             Write-Host " - Autofitting columns..."
             $columns.AutoFit() | Out-Null
 
-             # --- Bold Header Row ---
             Write-Host " - Bolding header row..."
             $headerRange = $worksheet.Rows.Item(1)
             $headerRange.Font.Bold = $true
 
-            # --- Highlight Rows where Country IS $CountryToHighlight (if more than header exists) ---
             if ($usedRange.Rows.Count -gt 1) {
                 Write-Host " - Searching for '$CountryColumnHeader' column..."
-                # Using [System.Reflection.Missing]::Value for optional parameters
                 $countryColumnObject = $headerRange.Find(
-                    $CountryColumnHeader, # What
-                    $missing,             # After
-                    $xlFormulas,          # LookIn
-                    $xlWhole,             # LookAt
-                    $xlByRows,            # SearchOrder
-                    $xlNext,              # SearchDirection
-                    $false,               # MatchCase
-                    $missing,             # MatchByte
-                    $missing              # SearchFormat
+                    $CountryColumnHeader, 
+                    $missing,             
+                    $xlFormulas,          
+                    $xlWhole,             
+                    $xlByRows,            
+                    $xlNext,              
+                    $false,               
+                    $missing,             
+                    $missing              
                 )
 
                 if ($countryColumnObject) {
                     $countryColumnIndex = $countryColumnObject.Column
                     Write-Host "   - '$CountryColumnHeader' column found at index $countryColumnIndex. Highlighting rows where country is '$CountryToHighlight'..."
-                    # Iterate through data rows
                     for ($i = 2; $i -le $rows.Count; $i++) {
                         $cell = $null; $rowRange = $null
                         try {
                             $cell = $worksheet.Cells.Item($i, $countryColumnIndex)
                             $countryValue = $cell.Value2
-                            # --- MODIFIED CONDITION: Highlight if country IS the specified value ---
                             if ($countryValue -and ($countryValue -as [string]).Trim() -ne '' -and ($countryValue -as [string]).Equals($CountryToHighlight, [System.StringComparison]::OrdinalIgnoreCase)) {
-                                # Highlight the entire row
                                 $rowRange = $worksheet.Rows.Item($i)
                                 $rowRange.Interior.ColorIndex = $HighlightColor
                             }
                         } finally {
-                            # Release cell and row COM objects within the loop
                             if ($cell) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($cell) | Out-Null }
                             if ($rowRange) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($rowRange) | Out-Null }
                         }
@@ -190,34 +179,31 @@ Function ConvertTo-XlsxAndFormat {
              Write-Host " - Worksheet appears empty, skipping formatting."
         }
 
-
-        # Save the changes to the XLSX file
         Write-Host "Saving formatted XLSX file..."
         $workbook.Save()
         $workbook.Close()
         Write-Host "XLSX formatting complete." -ForegroundColor Green
+        $script:lastExportedXlsxPath = $XlsxPath # Store path on success
+        if ($openFileButton) { $openFileButton.Enabled = $true } # Enable button in GUI
 
     } catch {
         Write-Error "Failed during Excel formatting or conversion. Error: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
         if ($statusLabel) { $statusLabel.Text = "Error: Failed during XLSX conversion/formatting." }
-        # Attempt to close workbook even if error occurred during formatting
         try { if ($workbook -ne $null) { $workbook.Close($false) } } catch {}
-        return $false # Indicate failure
+        return $false 
     } finally {
-        # Clean up COM objects meticulously
         if ($countryColumnObject) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($countryColumnObject) | Out-Null }
         if ($headerRange) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($headerRange) | Out-Null }
         if ($columns) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($columns) | Out-Null }
         if ($rows) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($rows) | Out-Null }
         if ($usedRange) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($usedRange) | Out-Null }
         if ($worksheet) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($worksheet) | Out-Null }
-        if ($workbook) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($workbook) | Out-Null } # Already closed in try/catch, just release
+        if ($workbook) { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($workbook) | Out-Null } 
         if ($excel) { $excel.Quit(); [System.Runtime.InteropServices.Marshal]::ReleaseComObject($excel) | Out-Null }
-        # Force garbage collection
         [gc]::Collect(); [gc]::WaitForPendingFinalizers()
         Write-Host "COM cleanup finished."
     }
-    return $true # Indicate success
+    return $true 
 }
 
 
@@ -238,7 +224,7 @@ if ($missing.Count -gt 0) {
 # Import necessary modules after check/install
 Import-Module Microsoft.Graph.Users
 Import-Module Microsoft.Graph.Reports
-Import-Module Microsoft.Graph.Identity.DirectoryManagement # For Get-MgOrganization
+Import-Module Microsoft.Graph.Identity.DirectoryManagement 
 
 # --- GUI Setup ---
 Add-Type -AssemblyName System.Windows.Forms
@@ -247,8 +233,8 @@ Add-Type -AssemblyName System.Drawing
 # Main Form
 $mainForm = New-Object System.Windows.Forms.Form
 $mainForm.Text = "Entra ID Forensic Log Fetcher"
-$mainForm.Size = New-Object System.Drawing.Size(600, 580)
-$mainForm.MinimumSize = New-Object System.Drawing.Size(550, 530)
+$mainForm.Size = New-Object System.Drawing.Size(600, 630) # Increased height for new button
+$mainForm.MinimumSize = New-Object System.Drawing.Size(550, 580)
 $mainForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $mainForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $mainForm.MaximizeBox = $false
@@ -274,22 +260,23 @@ $connectButton.add_Click({
     $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     $userCheckedListBox.Items.Clear()
     $getLogsButton.Enabled = $false
-    $script:tenantDomainNameForFile = $null # Reset tenant domain
-    $localTenantId = $null # To store tenant ID for fallback
+    $script:tenantDomainNameForFile = $null 
+    $script:lastExportedXlsxPath = $null # Clear last exported path
+    if ($openFileButton) { $openFileButton.Enabled = $false } # Disable open file button
+    $localTenantId = $null 
 
     try {
         Disconnect-MgGraph -ErrorAction SilentlyContinue
         Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
         $context = Get-MgContext
-        $localTenantId = $context.TenantId # Store for later fallback if needed
+        $localTenantId = $context.TenantId 
         $statusLabel.Text = "Connected as $($context.Account). Tenant: $localTenantId. Fetching org details..."
         $mainForm.Refresh()
         Write-Host "Successfully connected to Microsoft Graph." -ForegroundColor Green
 
-        # --- Attempt 1: Fetch Organization Details to get Tenant Domain ---
         try {
             Write-Host "Attempt 1: Fetching organization details..."
-            $orgDetails = Get-MgOrganization -Property Id, DisplayName, VerifiedDomains -ErrorAction SilentlyContinue # Continue if this fails
+            $orgDetails = Get-MgOrganization -Property Id, DisplayName, VerifiedDomains -ErrorAction SilentlyContinue 
             
             if ($orgDetails -and $orgDetails.Count -gt 0) {
                 $currentOrg = $orgDetails[0]
@@ -323,7 +310,6 @@ $connectButton.add_Click({
         $statusLabel.Text = "Org details processed. Loading users..."
         $mainForm.Refresh()
 
-        # --- Load Users ---
         Write-Host "Loading users..."
         $users = Get-MgUser -All -ErrorAction Stop -Select UserPrincipalName, Id, DisplayName -ConsistencyLevel eventual | Sort-Object UserPrincipalName
         
@@ -333,7 +319,6 @@ $connectButton.add_Click({
             }
             Write-Host "Loaded $($users.Count) users." -ForegroundColor Green
 
-            # --- Attempt 2: Parse domain from first UPN if Get-MgOrganization failed ---
             if (-not $script:tenantDomainNameForFile -and $users.Count -gt 0) {
                 Write-Host "Attempt 2: Parsing domain from first user's UPN..."
                 $firstUserUpn = $users[0].UserPrincipalName
@@ -353,7 +338,6 @@ $connectButton.add_Click({
             Write-Warning "No users loaded. Cannot parse domain from UPN."
         }
 
-        # --- Attempt 3: Final Fallback to Tenant ID ---
         if (-not $script:tenantDomainNameForFile) {
             Write-Warning "All attempts to find domain name failed. Using Tenant ID for filename."
             $script:tenantDomainNameForFile = $localTenantId 
@@ -393,7 +377,9 @@ $disconnectButton.add_Click({
         $statusLabel.Text = "Disconnected. Ready to connect."
         $disconnectButton.Enabled = $false
         $connectButton.Enabled = $true
-        $script:tenantDomainNameForFile = $null # Clear stored tenant domain
+        $script:tenantDomainNameForFile = $null 
+        $script:lastExportedXlsxPath = $null # Clear last exported path
+        if ($openFileButton) { $openFileButton.Enabled = $false } # Disable open file button
     } catch {
         $statusLabel.Text = "Error during disconnection. Check console."
         Write-Error "Error disconnecting from Microsoft Graph: $($_.Exception.Message)"
@@ -535,14 +521,14 @@ $getLogsButton.add_Click({
     $connectButton.Enabled = $false 
     $disconnectButton.Enabled = $false
     $logDurationNumericUpDown.Enabled = $false
+    if ($openFileButton) { $openFileButton.Enabled = $false } # Disable open file button during processing
 
     $allLogs = @()
     $errorOccurred = $false
-    $csvExported = $false # Flag to track if CSV was created
+    $csvExported = $false 
 
     try {
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        # --- Use Tenant Domain for Filename ---
         $safeTenantDomain = "UnknownTenant"
         if ($script:tenantDomainNameForFile) {
             if ($script:tenantDomainNameForFile -match "^\w{8}-\w{4}-\w{4}-\w{4}-\w{12}$") {
@@ -553,7 +539,7 @@ $getLogsButton.add_Click({
         }
         $baseFileName = "EntraSignInLogs_$($safeTenantDomain)_$timestamp"
         $csvFilePath = Join-Path -Path $outputFolder -ChildPath "$($baseFileName).csv"
-        $xlsxFilePath = Join-Path -Path $outputFolder -ChildPath "$($baseFileName).xlsx" # Define XLSX path
+        $xlsxFilePath = Join-Path -Path $outputFolder -ChildPath "$($baseFileName).xlsx" 
 
         Write-Host "Fetching logs starting from $startDate for users: $($selectedUpns -join ', ')"
         Write-Host "Output file will be: $xlsxFilePath (via $csvFilePath)"
@@ -637,18 +623,14 @@ $getLogsButton.add_Click({
                  $errorOccurred = $true
             }
 
-            # --- Convert and Format if CSV export was successful ---
             if ($csvExported) {
                 $statusLabel.Text = "Converting CSV to XLSX and formatting..."
                 Write-Host "Attempting conversion to XLSX format and applying formatting..."
-                # Pass the correct Country value to highlight
                 if (ConvertTo-XlsxAndFormat -CsvPath $csvFilePath -XlsxPath $xlsxFilePath -CountryColumnHeader "Country" -CountryToHighlight "United States") {
                     $statusLabel.Text = "Successfully exported and formatted $($allLogs.Count) logs to $xlsxFilePath"
                     [System.Windows.Forms.MessageBox]::Show("Successfully exported $($allLogs.Count) sign-in log entries and formatted the file:`n$xlsxFilePath", "XLSX Export Successful", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-                    # Optional: Clean up temporary CSV
                     try { Remove-Item -Path $csvFilePath -Force -ErrorAction SilentlyContinue } catch {}
                 } else {
-                    # Conversion/Formatting failed, message already shown by ConvertTo-XlsxAndFormat
                     $statusLabel.Text = "Exported to CSV ($csvFilePath), but XLSX conversion/formatting failed."
                     [System.Windows.Forms.MessageBox]::Show("Log data exported successfully to CSV:`n$csvFilePath`n`nHowever, conversion to XLSX or formatting failed. Please ensure Excel is installed or check console for errors.", "CSV Exported, XLSX Failed/Formatting Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
                     $errorOccurred = $true
@@ -666,6 +648,13 @@ $getLogsButton.add_Click({
         $connectButton.Enabled = $true   
         $disconnectButton.Enabled = $true 
         $logDurationNumericUpDown.Enabled = $true
+        # Enable open file button only if XLSX was successfully created and path is stored
+        if ($script:lastExportedXlsxPath -and (Test-Path $script:lastExportedXlsxPath)) {
+            if ($openFileButton) { $openFileButton.Enabled = $true }
+        } else {
+            if ($openFileButton) { $openFileButton.Enabled = $false }
+        }
+
         if ($errorOccurred) {
              $statusLabel.Text = "Operation finished with errors. Check console/messages."
         } elseif ($allLogs.Count -gt 0) {
@@ -673,18 +662,40 @@ $getLogsButton.add_Click({
         } else {
              # Status label already shows 'No logs found' or error message
         }
-        # Clean up temporary CSV if it still exists and XLSX failed
         if ($csvExported -and $errorOccurred -and (Test-Path $csvFilePath)) {
-             Write-Host "Cleaning up temporary CSV file ($csvFilePath) as XLSX conversion failed."
-             # Keep the CSV in case of failure for manual processing
-             # try { Remove-Item -Path $csvFilePath -Force -ErrorAction SilentlyContinue } catch {}
+             Write-Host "Temporary CSV file ($csvFilePath) kept as XLSX conversion failed."
         }
     }
 })
 $mainForm.Controls.Add($getLogsButton)
 
+# Open Last Exported File Button
+$openFileButton = New-Object System.Windows.Forms.Button
+$openFileButton.Location = New-Object System.Drawing.Point(20, 440) # Position below Get Logs button
+$openFileButton.Size = New-Object System.Drawing.Size(545, 30)
+$openFileButton.Text = "Open Last Exported File"
+$openFileButton.Enabled = $false # Initially disabled
+$openFileButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
+$openFileButton.add_Click({
+    param($sender, $e)
+    if ($script:lastExportedXlsxPath -and (Test-Path $script:lastExportedXlsxPath)) {
+        try {
+            Invoke-Item -Path $script:lastExportedXlsxPath -ErrorAction Stop
+            $statusLabel.Text = "Attempting to open: $($script:lastExportedXlsxPath)"
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Could not open the file: $($script:lastExportedXlsxPath)`nError: $($_.Exception.Message)", "Error Opening File", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            $statusLabel.Text = "Error opening file. See console."
+        }
+    } else {
+        [System.Windows.Forms.MessageBox]::Show("No file has been successfully exported in this session, or the file no longer exists.", "No File to Open", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        $statusLabel.Text = "No recent file to open."
+    }
+})
+$mainForm.Controls.Add($openFileButton)
+
+
 # --- Show Form ---
-$mainForm.Add_Shown({$mainForm.Activate()}) # Corrected: Single underscore
+$mainForm.Add_Shown({$mainForm.Activate()}) 
 [void]$mainForm.ShowDialog()
 
 # --- Script End ---
