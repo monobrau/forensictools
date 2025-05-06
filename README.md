@@ -53,7 +53,7 @@ This tool provides a simple Windows Forms interface to:
 
 ## Installation
 
-1.  **Save the Script:** Download or save the script file (e.g., `EntraID_Forensic_Log_Fetcher.ps1`) to your local machine.
+1.  **Save the Script:** Download or save the script file (e.g., `entrainvestigator.ps1`) to your local machine.
 2.  **Install Modules:** If you don't have the required Microsoft Graph modules installed, run the following command in PowerShell (as the user who will run the script):
     ```powershell
     Install-Module Microsoft.Graph.Users, Microsoft.Graph.Reports, Microsoft.Graph.Identity.DirectoryManagement -Scope CurrentUser -Repository PSGallery -Force
@@ -64,7 +64,7 @@ This tool provides a simple Windows Forms interface to:
 
 1.  **Run the Script:** Open PowerShell, navigate to the directory where you saved the script, and run it:
     ```powershell
-    .\EntraID_Forensic_Log_Fetcher.ps1
+    .\entrainvestigator.ps1
     ```
 2.  **Connect & Load Users:** Click the "Connect & Load Users" button. A Microsoft login window will appear. Authenticate using an account with the required permissions. Users will be loaded automatically. The script will also attempt to determine your tenant's domain for the output filename.
 3.  **Select Users:** Check the boxes next to the users you want to investigate.
