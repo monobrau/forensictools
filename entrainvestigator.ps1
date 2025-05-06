@@ -1,38 +1,42 @@
 <#
 .SYNOPSIS
 A PowerShell script with a GUI to fetch Entra ID sign-in logs for selected users,
-and export to CSV, expanding complex properties like Status and DeviceDetail. Filters logs by User ID for better reliability.
-Users are loaded automatically upon successful connection to Microsoft Graph. Includes a disconnect button.
+and export to CSV, expanding complex properties. Includes tenant domain in the filename
+(with UPN fallback). Users are loaded automatically upon successful connection. Includes a disconnect button.
 
 .DESCRIPTION
 This script provides a Windows Forms interface to:
-- Connect to Microsoft Graph (and automatically load Entra ID users).
+- Connect to Microsoft Graph (and automatically load Entra ID users and attempt to determine tenant domain).
 - Disconnect the Microsoft Graph session.
 - Select users for investigation.
 - Select the duration (1-30 days) for sign-in log history, with license warnings.
 - Select an output folder.
 - Fetch sign-in logs for the selected users (using User ID filter) and duration.
-- Export logs directly to CSV format, with expanded Status and DeviceDetail properties for readability.
+- Export logs directly to CSV format, with expanded Status and DeviceDetail properties.
+- The CSV filename will include the tenant's primary domain name (attempts Get-MgOrganization, then UPN parsing, then Tenant ID).
 
 .NOTES
 Author: Gemini
 Date: 2025-05-06
-Version: 2.1 (Added 'Disconnect from Graph' button)
-Requires: PowerShell 5.1+, Microsoft Graph SDK (Users, Reports).
-Permissions: Requires delegated User.Read.All and AuditLog.Read.All permissions in Entra ID.
+Version: 2.5 (Corrected Add_Shown event handler typo)
+Requires: PowerShell 5.1+, Microsoft Graph SDK (Users, Reports, Identity.DirectoryManagement).
+Permissions: Requires delegated User.Read.All, AuditLog.Read.All, and Organization.Read.All permissions in Entra ID.
 
 .LINK
-Install Modules: Install-Module Microsoft.Graph.Users, Microsoft.Graph.Reports -Scope CurrentUser -Force
+Install Modules: Install-Module Microsoft.Graph.Users, Microsoft.Graph.Reports, Microsoft.Graph.Identity.DirectoryManagement -Scope CurrentUser -Force
 
 .EXAMPLE
 .\EntraID_Forensic_Log_Fetcher.ps1
 #>
 
-#Requires -Modules Microsoft.Graph.Users, Microsoft.Graph.Reports
+#Requires -Modules Microsoft.Graph.Users, Microsoft.Graph.Reports, Microsoft.Graph.Identity.DirectoryManagement
 
 # --- Configuration ---
-$requiredModules = @("Microsoft.Graph.Users", "Microsoft.Graph.Reports")
-$requiredScopes = @("User.Read.All", "AuditLog.Read.All")
+$requiredModules = @("Microsoft.Graph.Users", "Microsoft.Graph.Reports", "Microsoft.Graph.Identity.DirectoryManagement")
+$requiredScopes = @("User.Read.All", "AuditLog.Read.All", "Organization.Read.All")
+
+# Script-level variable to store tenant domain
+$script:tenantDomainNameForFile = $null
 
 # --- Function Definitions ---
 
@@ -78,6 +82,7 @@ if ($missing.Count -gt 0) {
 # Import necessary modules after check/install
 Import-Module Microsoft.Graph.Users
 Import-Module Microsoft.Graph.Reports
+Import-Module Microsoft.Graph.Identity.DirectoryManagement # For Get-MgOrganization
 
 # --- GUI Setup ---
 Add-Type -AssemblyName System.Windows.Forms
@@ -104,7 +109,7 @@ $mainForm.Controls.Add($statusStrip)
 # Connect Button
 $connectButton = New-Object System.Windows.Forms.Button
 $connectButton.Location = New-Object System.Drawing.Point(20, 20)
-$connectButton.Size = New-Object System.Drawing.Size(160, 30) # Adjusted size
+$connectButton.Size = New-Object System.Drawing.Size(160, 30)
 $connectButton.Text = "Connect & Load Users"
 $connectButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
 $connectButton.add_Click({
@@ -113,15 +118,58 @@ $connectButton.add_Click({
     $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     $userCheckedListBox.Items.Clear()
     $getLogsButton.Enabled = $false
+    $script:tenantDomainNameForFile = $null # Reset tenant domain
+    $localTenantId = $null # To store tenant ID for fallback
 
     try {
         Disconnect-MgGraph -ErrorAction SilentlyContinue
         Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
         $context = Get-MgContext
-        $statusLabel.Text = "Connected as $($context.Account). Tenant: $($context.TenantId). Loading users..."
+        $localTenantId = $context.TenantId # Store for later fallback if needed
+        $statusLabel.Text = "Connected as $($context.Account). Tenant: $localTenantId. Fetching org details..."
         $mainForm.Refresh()
         Write-Host "Successfully connected to Microsoft Graph." -ForegroundColor Green
 
+        # --- Attempt 1: Fetch Organization Details to get Tenant Domain ---
+        try {
+            Write-Host "Attempt 1: Fetching organization details..."
+            $orgDetails = Get-MgOrganization -Property Id, DisplayName, VerifiedDomains -ErrorAction SilentlyContinue # Continue if this fails
+            
+            if ($orgDetails -and $orgDetails.Count -gt 0) {
+                $currentOrg = $orgDetails[0]
+                Write-Host "Organization DisplayName: $($currentOrg.DisplayName)"
+                # Write-Host "Verified Domains object from Graph:" # Optional: Keep for deep debugging
+                # $currentOrg.VerifiedDomains | Format-Table -AutoSize | Out-String | Write-Host
+
+                if ($currentOrg.VerifiedDomains) {
+                    $defaultDomain = $currentOrg.VerifiedDomains | Where-Object {$_.IsDefault -eq $true} | Select-Object -ExpandProperty Name -First 1
+                    if ($defaultDomain) {
+                        $script:tenantDomainNameForFile = $defaultDomain
+                        Write-Host "Default tenant domain found via Get-MgOrganization: $($script:tenantDomainNameForFile)" -ForegroundColor Green
+                    } else {
+                        Write-Warning "No default domain found (IsDefault -eq `$true) via Get-MgOrganization."
+                        $firstDomainName = $currentOrg.VerifiedDomains | Select-Object -ExpandProperty Name -First 1
+                        if ($firstDomainName) {
+                            $script:tenantDomainNameForFile = $firstDomainName
+                            Write-Host "Using first verified tenant domain via Get-MgOrganization: $($script:tenantDomainNameForFile)" -ForegroundColor Yellow
+                        } else {
+                            Write-Warning "No verified domains found via Get-MgOrganization."
+                        }
+                    }
+                } else {
+                    Write-Warning "VerifiedDomains property is null or empty from Get-MgOrganization."
+                }
+            } else {
+                Write-Warning "Could not retrieve organization details via Get-MgOrganization."
+            }
+        } catch {
+            Write-Warning "Error during Get-MgOrganization: $($_.Exception.Message)."
+        }
+        
+        $statusLabel.Text = "Org details processed. Loading users..."
+        $mainForm.Refresh()
+
+        # --- Load Users ---
         Write-Host "Loading users..."
         $users = Get-MgUser -All -ErrorAction Stop -Select UserPrincipalName, Id, DisplayName -ConsistencyLevel eventual | Sort-Object UserPrincipalName
         
@@ -129,19 +177,42 @@ $connectButton.add_Click({
             foreach ($user in $users) {
                 $userCheckedListBox.Items.Add($user.UserPrincipalName, $false)
             }
-            $statusLabel.Text = "Connected. Loaded $($users.Count) users. Select users to investigate."
             Write-Host "Loaded $($users.Count) users." -ForegroundColor Green
+
+            # --- Attempt 2: Parse domain from first UPN if Get-MgOrganization failed ---
+            if (-not $script:tenantDomainNameForFile -and $users.Count -gt 0) {
+                Write-Host "Attempt 2: Parsing domain from first user's UPN..."
+                $firstUserUpn = $users[0].UserPrincipalName
+                if ($firstUserUpn -like "*@*") {
+                    $domainFromUpn = $firstUserUpn.Split('@')[1]
+                    if (-not [string]::IsNullOrWhiteSpace($domainFromUpn)) {
+                        $script:tenantDomainNameForFile = $domainFromUpn
+                        Write-Host "Tenant domain determined from UPN: $($script:tenantDomainNameForFile)" -ForegroundColor Green
+                    } else {
+                        Write-Warning "Could not parse a valid domain from UPN '$firstUserUpn'."
+                    }
+                } else {
+                    Write-Warning "First user UPN '$firstUserUpn' does not contain '@'."
+                }
+            }
         } else {
-            $statusLabel.Text = "Connected. No users found or error loading users."
-            [System.Windows.Forms.MessageBox]::Show("Connected to Graph, but no users found in the tenant or an error occurred during user loading.", "No Users Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            Write-Warning "No users loaded. Cannot parse domain from UPN."
         }
-        $disconnectButton.Enabled = $true # Enable disconnect button after successful connection
+
+        # --- Attempt 3: Final Fallback to Tenant ID ---
+        if (-not $script:tenantDomainNameForFile) {
+            Write-Warning "All attempts to find domain name failed. Using Tenant ID for filename."
+            $script:tenantDomainNameForFile = $localTenantId 
+        }
+        
+        $statusLabel.Text = "Connected. Loaded $($users.Count) users. Tenant for filename: $($script:tenantDomainNameForFile)"
+        $disconnectButton.Enabled = $true
 
     } catch {
         $statusLabel.Text = "Operation failed. Check console for errors."
         Write-Error "Microsoft Graph connection or user loading failed: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show("Failed to connect to Microsoft Graph or load users. Ensure you have internet connectivity and the necessary permissions. `n`nError: $($_.Exception.Message)", "Connection/Load Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-        $disconnectButton.Enabled = $false # Ensure disconnect is disabled if connection fails
+        $disconnectButton.Enabled = $false
     } finally {
         $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
         $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
@@ -151,29 +222,29 @@ $mainForm.Controls.Add($connectButton)
 
 # Disconnect Button
 $disconnectButton = New-Object System.Windows.Forms.Button
-$disconnectButton.Location = New-Object System.Drawing.Point(190, 20) # Positioned next to connect button
-$disconnectButton.Size = New-Object System.Drawing.Size(160, 30)    # Adjusted size
+$disconnectButton.Location = New-Object System.Drawing.Point(190, 20)
+$disconnectButton.Size = New-Object System.Drawing.Size(160, 30)
 $disconnectButton.Text = "Disconnect from Graph"
-$disconnectButton.Enabled = $false # Initially disabled
+$disconnectButton.Enabled = $false
 $disconnectButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
 $disconnectButton.add_Click({
     param($sender, $e)
     $statusLabel.Text = "Disconnecting from Microsoft Graph..."
     $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     try {
-        Disconnect-MgGraph -ErrorAction SilentlyContinue # Silently continue if not connected
+        Disconnect-MgGraph -ErrorAction SilentlyContinue
         Write-Host "Disconnected from Microsoft Graph." -ForegroundColor Green
         $userCheckedListBox.Items.Clear()
         $getLogsButton.Enabled = $false
         $statusLabel.Text = "Disconnected. Ready to connect."
-        $disconnectButton.Enabled = $false # Disable itself after disconnecting
-        $connectButton.Enabled = $true # Ensure connect button is enabled
+        $disconnectButton.Enabled = $false
+        $connectButton.Enabled = $true
+        $script:tenantDomainNameForFile = $null # Clear stored tenant domain
     } catch {
         $statusLabel.Text = "Error during disconnection. Check console."
         Write-Error "Error disconnecting from Microsoft Graph: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show("An error occurred while trying to disconnect.`n`nError: $($_.Exception.Message)", "Disconnection Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-        # Even if disconnect fails, try to reset state
-        $disconnectButton.Enabled = $true # Keep enabled if error
+        $disconnectButton.Enabled = $true
     } finally {
         $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
     }
@@ -197,7 +268,7 @@ $userCheckedListBox.CheckOnClick = $true
 $userCheckedListBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $userCheckedListBox.add_ItemCheck({
     $mainForm.BeginInvoke([System.Action]{
-        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled) # Also check if connected
+        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled)
     })
 })
 $mainForm.Controls.Add($userCheckedListBox)
@@ -253,7 +324,7 @@ $outputFolderTextBox.Size = New-Object System.Drawing.Size(345, 25)
 $outputFolderTextBox.ReadOnly = $true
 $outputFolderTextBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $outputFolderTextBox.add_TextChanged({
-    $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled) # Also check if connected
+    $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled)
 })
 $mainForm.Controls.Add($outputFolderTextBox)
 
@@ -270,7 +341,7 @@ $browseFolderButton.add_Click({
     if ($folderBrowserDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $outputFolderTextBox.Text = $folderBrowserDialog.SelectedPath
         $statusLabel.Text = "Output folder selected: $($outputFolderTextBox.Text)"
-        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled) # Also check if connected
+        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled)
     }
 })
 $mainForm.Controls.Add($browseFolderButton)
@@ -308,7 +379,7 @@ $getLogsButton.add_Click({
     $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     $getLogsButton.Enabled = $false
     $connectButton.Enabled = $false 
-    $disconnectButton.Enabled = $false # Disable disconnect during log fetch
+    $disconnectButton.Enabled = $false
     $logDurationNumericUpDown.Enabled = $false
 
     $allLogs = @()
@@ -316,10 +387,22 @@ $getLogsButton.add_Click({
 
     try {
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $baseFileName = "EntraSignInLogs_$timestamp"
+        # --- Use Tenant Domain for Filename ---
+        $safeTenantDomain = "UnknownTenant" # Default if not found or if it's a GUID
+        if ($script:tenantDomainNameForFile) {
+            # Check if it looks like a GUID (common for TenantID fallback)
+            if ($script:tenantDomainNameForFile -match "^\w{8}-\w{4}-\w{4}-\w{4}-\w{12}$") {
+                $safeTenantDomain = $script:tenantDomainNameForFile # Keep GUID as is if it's the fallback
+            } else {
+                # Sanitize domain name for filename
+                $safeTenantDomain = $script:tenantDomainNameForFile -replace "[^a-zA-Z0-9_.-]", "" -replace "\.", "_" 
+            }
+        }
+        $baseFileName = "EntraSignInLogs_$($safeTenantDomain)_$timestamp"
         $csvFilePath = Join-Path -Path $outputFolder -ChildPath "$($baseFileName).csv"
 
         Write-Host "Fetching logs starting from $startDate for users: $($selectedUpns -join ', ')"
+        Write-Host "Output file will be: $csvFilePath"
 
         $totalUsers = $selectedUpns.Count
         $currentUserIndex = 0
@@ -407,9 +490,9 @@ $getLogsButton.add_Click({
         $errorOccurred = $true
     } finally {
         $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
-        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled) # Enable if connected and items selected
+        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '' -and $disconnectButton.Enabled)
         $connectButton.Enabled = $true   
-        $disconnectButton.Enabled = $true # Re-enable disconnect button if it was enabled before log fetch
+        $disconnectButton.Enabled = $true 
         $logDurationNumericUpDown.Enabled = $true
         if ($errorOccurred) {
              $statusLabel.Text = "Operation finished with errors. Check console/messages."
@@ -423,6 +506,7 @@ $getLogsButton.add_Click({
 $mainForm.Controls.Add($getLogsButton)
 
 # --- Show Form ---
+# Corrected Add_Shown (single underscore)
 $mainForm.Add_Shown({$mainForm.Activate()}) # Bring form to front
 [void]$mainForm.ShowDialog()
 
