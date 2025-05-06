@@ -2,11 +2,11 @@
 .SYNOPSIS
 A PowerShell script with a GUI to fetch Entra ID sign-in logs for selected users,
 and export to CSV, expanding complex properties like Status and DeviceDetail. Filters logs by User ID for better reliability.
+Users are loaded automatically upon successful connection to Microsoft Graph.
 
 .DESCRIPTION
 This script provides a Windows Forms interface to:
-- Connect to Microsoft Graph.
-- Load Entra ID users.
+- Connect to Microsoft Graph (and automatically load Entra ID users).
 - Select users for investigation.
 - Select the duration (1-30 days) for sign-in log history, with license warnings.
 - Select an output folder.
@@ -16,7 +16,7 @@ This script provides a Windows Forms interface to:
 .NOTES
 Author: Gemini
 Date: 2025-05-06
-Version: 1.9 (Expanded Status and DeviceDetail properties in CSV output)
+Version: 2.0 (Users now load automatically after connecting to Graph; removed separate 'Load Users' button)
 Requires: PowerShell 5.1+, Microsoft Graph SDK (Users, Reports).
 Permissions: Requires delegated User.Read.All and AuditLog.Read.All permissions in Entra ID.
 
@@ -103,65 +103,53 @@ $mainForm.Controls.Add($statusStrip)
 # Connect Button
 $connectButton = New-Object System.Windows.Forms.Button
 $connectButton.Location = New-Object System.Drawing.Point(20, 20)
-$connectButton.Size = New-Object System.Drawing.Size(150, 30)
-$connectButton.Text = "Connect to Graph"
+$connectButton.Size = New-Object System.Drawing.Size(200, 30) # Made button wider
+$connectButton.Text = "Connect & Load Users"       # Updated Text
 $connectButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
 $connectButton.add_Click({
     param($sender, $e)
     $statusLabel.Text = "Connecting to Microsoft Graph..."
     $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+    $userCheckedListBox.Items.Clear() # Clear previous user list
+    $getLogsButton.Enabled = $false   # Disable get logs button initially
+
     try {
+        # --- Connect to Graph ---
         Disconnect-MgGraph -ErrorAction SilentlyContinue
         Connect-MgGraph -Scopes $requiredScopes -ErrorAction Stop
         $context = Get-MgContext
-        $statusLabel.Text = "Connected as $($context.Account) Tenant: $($context.TenantId)"
-        $loadUsersButton.Enabled = $true
+        $statusLabel.Text = "Connected as $($context.Account). Tenant: $($context.TenantId). Loading users..."
+        $mainForm.Refresh() # Ensure status update is visible
         Write-Host "Successfully connected to Microsoft Graph." -ForegroundColor Green
-    } catch {
-        $statusLabel.Text = "Connection failed. Check console for errors."
-        Write-Error "Microsoft Graph connection failed: $($_.Exception.Message)"
-        [System.Windows.Forms.MessageBox]::Show("Failed to connect to Microsoft Graph. Ensure you have internet connectivity and the necessary permissions. `n`nError: $($_.Exception.Message)", "Connection Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-        $loadUsersButton.Enabled = $false
-    } finally {
-        $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
-    }
-})
-$mainForm.Controls.Add($connectButton)
 
-# Load Users Button
-$loadUsersButton = New-Object System.Windows.Forms.Button
-$loadUsersButton.Location = New-Object System.Drawing.Point(180, 20)
-$loadUsersButton.Size = New-Object System.Drawing.Size(150, 30)
-$loadUsersButton.Text = "Load Entra Users"
-$loadUsersButton.Enabled = $false
-$loadUsersButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
-$loadUsersButton.add_Click({
-    param($sender, $e)
-    $statusLabel.Text = "Loading users... This may take a while for large tenants."
-    $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-    $userCheckedListBox.Items.Clear()
-    $getLogsButton.Enabled = $false
-    try {
+        # --- Load Users (Moved here) ---
+        Write-Host "Loading users..."
+        # Fetch users - Use -All for complete list, but be mindful of performance
         $users = Get-MgUser -All -ErrorAction Stop -Select UserPrincipalName, Id, DisplayName -ConsistencyLevel eventual | Sort-Object UserPrincipalName
+        
         if ($users) {
             foreach ($user in $users) {
                 $userCheckedListBox.Items.Add($user.UserPrincipalName, $false)
             }
-            $statusLabel.Text = "Loaded $($users.Count) users. Select users to investigate."
+            $statusLabel.Text = "Connected. Loaded $($users.Count) users. Select users to investigate."
             Write-Host "Loaded $($users.Count) users." -ForegroundColor Green
+            # $getLogsButton can be enabled if an output folder is already selected, handled by its own logic
         } else {
-            $statusLabel.Text = "No users found or error loading users."
-             [System.Windows.Forms.MessageBox]::Show("No users found in the tenant or an error occurred.", "No Users", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            $statusLabel.Text = "Connected. No users found or error loading users."
+            [System.Windows.Forms.MessageBox]::Show("Connected to Graph, but no users found in the tenant or an error occurred during user loading.", "No Users Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
         }
+
     } catch {
-        $statusLabel.Text = "Error loading users. Check console."
-        Write-Error "Error fetching users from Microsoft Graph: $($_.Exception.Message)"
-         [System.Windows.Forms.MessageBox]::Show("Error fetching users from Microsoft Graph.`n`nError: $($_.Exception.Message)", "Error Loading Users", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        $statusLabel.Text = "Operation failed. Check console for errors."
+        Write-Error "Microsoft Graph connection or user loading failed: $($_.Exception.Message)"
+        [System.Windows.Forms.MessageBox]::Show("Failed to connect to Microsoft Graph or load users. Ensure you have internet connectivity and the necessary permissions. `n`nError: $($_.Exception.Message)", "Connection/Load Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
     } finally {
         $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
+        # Check if getLogsButton should be enabled based on current state
+        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
     }
 })
-$mainForm.Controls.Add($loadUsersButton)
+$mainForm.Controls.Add($connectButton)
 
 # User List Label
 $userListLabel = New-Object System.Windows.Forms.Label
@@ -252,6 +240,8 @@ $browseFolderButton.add_Click({
     if ($folderBrowserDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $outputFolderTextBox.Text = $folderBrowserDialog.SelectedPath
         $statusLabel.Text = "Output folder selected: $($outputFolderTextBox.Text)"
+        # Enable Get Logs button if users are also selected
+        $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
     }
 })
 $mainForm.Controls.Add($browseFolderButton)
@@ -288,8 +278,8 @@ $getLogsButton.add_Click({
     $statusLabel.Text = "Fetching logs for $($selectedUpns.Count) users (Last $days days)..."
     $mainForm.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
     $getLogsButton.Enabled = $false
-    $loadUsersButton.Enabled = $false
-    $connectButton.Enabled = $false
+    # $loadUsersButton.Enabled = $false # Button removed
+    $connectButton.Enabled = $false # Disable connect button during log fetch
     $logDurationNumericUpDown.Enabled = $false
 
     $allLogs = @()
@@ -356,7 +346,6 @@ $getLogsButton.add_Click({
             $statusLabel.Text = "Exporting $($allLogs.Count) log entries to CSV..."
             Write-Host "Exporting $($allLogs.Count) total log entries to $csvFilePath"
 
-            # --- MODIFIED Select-Object to expand complex properties ---
             $exportData = $allLogs | Select-Object UserPrincipalName, CreatedDateTime, AppDisplayName, IpAddress, `
                 @{Name='City';Expression={$_.Location.City}}, `
                 @{Name='State';Expression={$_.Location.State}}, `
@@ -390,8 +379,8 @@ $getLogsButton.add_Click({
     } finally {
         $mainForm.Cursor = [System.Windows.Forms.Cursors]::Default
         $getLogsButton.Enabled = ($userCheckedListBox.CheckedItems.Count -gt 0 -and $outputFolderTextBox.Text -ne '')
-        $loadUsersButton.Enabled = $true
-        $connectButton.Enabled = $true
+        # $loadUsersButton.Enabled = $true # Button removed
+        $connectButton.Enabled = $true   # Re-enable connect button
         $logDurationNumericUpDown.Enabled = $true
         if ($errorOccurred) {
              $statusLabel.Text = "Operation finished with errors. Check console/messages."
