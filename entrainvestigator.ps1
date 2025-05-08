@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
 A PowerShell script with a GUI to fetch Entra ID sign-in logs for selected users,
-and export to a formatted XLSX file. Includes a button to open the last exported file.
+and export to a formatted XLSX file. Includes a GUI indicator for P1/P2 licensing.
 
 .DESCRIPTION
 This script provides a Windows Forms interface to:
-- Connect to Microsoft Graph (and automatically load Entra ID users and attempt to determine tenant domain).
+- Connect to Microsoft Graph (loads users, attempts to determine tenant domain, and checks for P1/P2 license, displaying status in the GUI).
 - Disconnect the Microsoft Graph session.
 - Select users for investigation.
 - Select the duration (1-30 days) for sign-in log history, with license warnings.
@@ -20,13 +20,13 @@ This script provides a Windows Forms interface to:
 
 .NOTES
 Author: Gemini
-Date: 2025-05-06
-Version: 3.4 (Added 'Open Last Exported File' button)
+Date: 2025-05-08
+Version: 3.7 (Corrected positioning of GUI license status label)
 Requires:
     - PowerShell 5.1+
     - Microsoft Graph SDK (Users, Reports, Identity.DirectoryManagement)
     - *** Microsoft Excel Installed *** (for XLSX conversion and formatting)
-Permissions: Requires delegated User.Read.All, AuditLog.Read.All, and Organization.Read.All permissions in Entra ID.
+Permissions: Requires delegated User.Read.All, AuditLog.Read.All, Organization.Read.All, and Directory.Read.All permissions in Entra ID.
 
 .LINK
 Install Modules: Install-Module Microsoft.Graph.Users, Microsoft.Graph.Reports, Microsoft.Graph.Identity.DirectoryManagement -Scope CurrentUser -Force
@@ -39,12 +39,14 @@ Install Modules: Install-Module Microsoft.Graph.Users, Microsoft.Graph.Reports, 
 
 # --- Configuration ---
 $requiredModules = @("Microsoft.Graph.Users", "Microsoft.Graph.Reports", "Microsoft.Graph.Identity.DirectoryManagement")
-$requiredScopes = @("User.Read.All", "AuditLog.Read.All", "Organization.Read.All")
-$highlightColorIndexYellow = 6 # Excel ColorIndex for Yellow
+$requiredScopes = @("User.Read.All", "AuditLog.Read.All", "Organization.Read.All", "Directory.Read.All") 
+$highlightColorIndexYellow = 6 
+$premiumSkuPartNumbers = @("AAD_PREMIUM", "AAD_PREMIUM_P2", "EMSPREMIUM", "EMSGLOBAL") 
 
 # Script-level variables
 $script:tenantDomainNameForFile = $null
-$script:lastExportedXlsxPath = $null # To store the path of the last exported XLSX file
+$script:lastExportedXlsxPath = $null 
+$script:hasPremiumLicense = $false 
 
 # --- Function Definitions ---
 
@@ -140,15 +142,8 @@ Function ConvertTo-XlsxAndFormat {
             if ($usedRange.Rows.Count -gt 1) {
                 Write-Host " - Searching for '$CountryColumnHeader' column..."
                 $countryColumnObject = $headerRange.Find(
-                    $CountryColumnHeader, 
-                    $missing,             
-                    $xlFormulas,          
-                    $xlWhole,             
-                    $xlByRows,            
-                    $xlNext,              
-                    $false,               
-                    $missing,             
-                    $missing              
+                    $CountryColumnHeader, $missing, $xlFormulas, $xlWhole, 
+                    $xlByRows, $xlNext, $false, $missing, $missing              
                 )
 
                 if ($countryColumnObject) {
@@ -183,8 +178,8 @@ Function ConvertTo-XlsxAndFormat {
         $workbook.Save()
         $workbook.Close()
         Write-Host "XLSX formatting complete." -ForegroundColor Green
-        $script:lastExportedXlsxPath = $XlsxPath # Store path on success
-        if ($openFileButton) { $openFileButton.Enabled = $true } # Enable button in GUI
+        $script:lastExportedXlsxPath = $XlsxPath 
+        if ($openFileButton) { $openFileButton.Enabled = $true } 
 
     } catch {
         Write-Error "Failed during Excel formatting or conversion. Error: $($_.Exception.Message)`n$($_.ScriptStackTrace)"
@@ -233,8 +228,8 @@ Add-Type -AssemblyName System.Drawing
 # Main Form
 $mainForm = New-Object System.Windows.Forms.Form
 $mainForm.Text = "Entra ID Forensic Log Fetcher"
-$mainForm.Size = New-Object System.Drawing.Size(600, 630) # Increased height for new button
-$mainForm.MinimumSize = New-Object System.Drawing.Size(550, 580)
+$mainForm.Size = New-Object System.Drawing.Size(600, 650) 
+$mainForm.MinimumSize = New-Object System.Drawing.Size(550, 600)
 $mainForm.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
 $mainForm.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedDialog
 $mainForm.MaximizeBox = $false
@@ -261,8 +256,10 @@ $connectButton.add_Click({
     $userCheckedListBox.Items.Clear()
     $getLogsButton.Enabled = $false
     $script:tenantDomainNameForFile = $null 
-    $script:lastExportedXlsxPath = $null # Clear last exported path
-    if ($openFileButton) { $openFileButton.Enabled = $false } # Disable open file button
+    $script:lastExportedXlsxPath = $null 
+    if ($openFileButton) { $openFileButton.Enabled = $false } 
+    $script:hasPremiumLicense = $false 
+    $licenseStatusLabel.Text = "" # Clear license label
     $localTenantId = $null 
 
     try {
@@ -274,6 +271,7 @@ $connectButton.add_Click({
         $mainForm.Refresh()
         Write-Host "Successfully connected to Microsoft Graph." -ForegroundColor Green
 
+        # --- Attempt 1: Fetch Organization Details ---
         try {
             Write-Host "Attempt 1: Fetching organization details..."
             $orgDetails = Get-MgOrganization -Property Id, DisplayName, VerifiedDomains -ErrorAction SilentlyContinue 
@@ -288,28 +286,60 @@ $connectButton.add_Click({
                         $script:tenantDomainNameForFile = $defaultDomain
                         Write-Host "Default tenant domain found via Get-MgOrganization: $($script:tenantDomainNameForFile)" -ForegroundColor Green
                     } else {
-                        Write-Warning "No default domain found (IsDefault -eq `$true) via Get-MgOrganization."
+                        Write-Warning "No default domain found via Get-MgOrganization."
                         $firstDomainName = $currentOrg.VerifiedDomains | Select-Object -ExpandProperty Name -First 1
                         if ($firstDomainName) {
                             $script:tenantDomainNameForFile = $firstDomainName
                             Write-Host "Using first verified tenant domain via Get-MgOrganization: $($script:tenantDomainNameForFile)" -ForegroundColor Yellow
-                        } else {
-                            Write-Warning "No verified domains found via Get-MgOrganization."
-                        }
+                        } else { Write-Warning "No verified domains found via Get-MgOrganization." }
                     }
-                } else {
-                    Write-Warning "VerifiedDomains property is null or empty from Get-MgOrganization."
-                }
-            } else {
-                Write-Warning "Could not retrieve organization details via Get-MgOrganization."
-            }
-        } catch {
-            Write-Warning "Error during Get-MgOrganization: $($_.Exception.Message)."
-        }
+                } else { Write-Warning "VerifiedDomains property is null or empty from Get-MgOrganization." }
+            } else { Write-Warning "Could not retrieve organization details via Get-MgOrganization." }
+        } catch { Write-Warning "Error during Get-MgOrganization: $($_.Exception.Message)." }
         
-        $statusLabel.Text = "Org details processed. Loading users..."
+        $statusLabel.Text = "Org details processed. Checking license..."
         $mainForm.Refresh()
 
+        # --- Check for P1/P2 License ---
+        $licenseGuiMessage = "License Status: Unknown / Error"
+        $licenseGuiColor = [System.Drawing.Color]::OrangeRed
+        try {
+             Write-Host "Checking for Entra P1/P2 licenses..."
+             $subscribedSkus = Get-MgSubscribedSku -All -ErrorAction SilentlyContinue
+             if ($subscribedSkus) {
+                 foreach ($sku in $subscribedSkus) {
+                     if ($sku.SkuPartNumber -in $premiumSkuPartNumbers) {
+                         Write-Host "Found premium SKU: $($sku.SkuPartNumber)" -ForegroundColor Green
+                         $script:hasPremiumLicense = $true
+                         $licenseGuiMessage = "License Status: P1/P2 Detected (30-day logs likely)"
+                         $licenseGuiColor = [System.Drawing.Color]::Green 
+                         break 
+                     }
+                 }
+                 if (-not $script:hasPremiumLicense) {
+                     Write-Warning "No standard Entra ID P1/P2 SKU detected."
+                     $licenseGuiMessage = "License Status: P1/P2 NOT Detected (>7 day logs unlikely)"
+                     $licenseGuiColor = [System.Drawing.Color]::OrangeRed 
+                 }
+             } else {
+                 Write-Warning "Could not retrieve subscribed SKUs."
+                 $licenseGuiMessage = "License Status: Could not retrieve SKUs"
+                 $licenseGuiColor = [System.Drawing.Color]::OrangeRed 
+             }
+        } catch {
+             Write-Warning "Error checking subscribed SKUs: $($_.Exception.Message)"
+             $licenseGuiMessage = "License Status: Error checking SKUs"
+             $licenseGuiColor = [System.Drawing.Color]::Red 
+        }
+        # Update the GUI Label
+        $licenseStatusLabel.Text = $licenseGuiMessage
+        $licenseStatusLabel.ForeColor = $licenseGuiColor
+
+        $statusLabel.Text = "License check complete. Loading users..."
+        $mainForm.Refresh()
+
+
+        # --- Load Users ---
         Write-Host "Loading users..."
         $users = Get-MgUser -All -ErrorAction Stop -Select UserPrincipalName, Id, DisplayName -ConsistencyLevel eventual | Sort-Object UserPrincipalName
         
@@ -327,27 +357,23 @@ $connectButton.add_Click({
                     if (-not [string]::IsNullOrWhiteSpace($domainFromUpn)) {
                         $script:tenantDomainNameForFile = $domainFromUpn
                         Write-Host "Tenant domain determined from UPN: $($script:tenantDomainNameForFile)" -ForegroundColor Green
-                    } else {
-                        Write-Warning "Could not parse a valid domain from UPN '$firstUserUpn'."
-                    }
-                } else {
-                    Write-Warning "First user UPN '$firstUserUpn' does not contain '@'."
-                }
+                    } else { Write-Warning "Could not parse a valid domain from UPN '$firstUserUpn'." }
+                } else { Write-Warning "First user UPN '$firstUserUpn' does not contain '@'." }
             }
-        } else {
-            Write-Warning "No users loaded. Cannot parse domain from UPN."
-        }
+        } else { Write-Warning "No users loaded. Cannot parse domain from UPN." }
 
         if (-not $script:tenantDomainNameForFile) {
             Write-Warning "All attempts to find domain name failed. Using Tenant ID for filename."
             $script:tenantDomainNameForFile = $localTenantId 
         }
         
-        $statusLabel.Text = "Connected. Loaded $($users.Count) users. Tenant for filename: $($script:tenantDomainNameForFile)"
+        $statusLabel.Text = "Connected. Loaded $($users.Count) users. Tenant: $($script:tenantDomainNameForFile)." 
         $disconnectButton.Enabled = $true
 
     } catch {
         $statusLabel.Text = "Operation failed. Check console for errors."
+        $licenseStatusLabel.Text = "License Status: Unknown (Connection Failed)" 
+        $licenseStatusLabel.ForeColor = [System.Drawing.Color]::Red
         Write-Error "Microsoft Graph connection or user loading failed: $($_.Exception.Message)"
         [System.Windows.Forms.MessageBox]::Show("Failed to connect to Microsoft Graph or load users. Ensure you have internet connectivity and the necessary permissions. `n`nError: $($_.Exception.Message)", "Connection/Load Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
         $disconnectButton.Enabled = $false
@@ -378,8 +404,10 @@ $disconnectButton.add_Click({
         $disconnectButton.Enabled = $false
         $connectButton.Enabled = $true
         $script:tenantDomainNameForFile = $null 
-        $script:lastExportedXlsxPath = $null # Clear last exported path
-        if ($openFileButton) { $openFileButton.Enabled = $false } # Disable open file button
+        $script:lastExportedXlsxPath = $null 
+        if ($openFileButton) { $openFileButton.Enabled = $false } 
+        $script:hasPremiumLicense = $false 
+        $licenseStatusLabel.Text = "" # Clear license label on disconnect
     } catch {
         $statusLabel.Text = "Error during disconnection. Check console."
         Write-Error "Error disconnecting from Microsoft Graph: $($_.Exception.Message)"
@@ -391,18 +419,27 @@ $disconnectButton.add_Click({
 })
 $mainForm.Controls.Add($disconnectButton)
 
+# License Status Label - Adjusted Y position
+$licenseStatusLabel = New-Object System.Windows.Forms.Label
+$licenseStatusLabel.Location = New-Object System.Drawing.Point(20, 55) # Y = 55 (Below buttons)
+$licenseStatusLabel.Size = New-Object System.Drawing.Size(545, 20) 
+$licenseStatusLabel.Text = "" # Initially blank
+$licenseStatusLabel.ForeColor = [System.Drawing.Color]::Gray # Default color
+$licenseStatusLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$licenseStatusLabel.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
+$mainForm.Controls.Add($licenseStatusLabel)
 
-# User List Label
+# User List Label - Adjusted Y position
 $userListLabel = New-Object System.Windows.Forms.Label
-$userListLabel.Location = New-Object System.Drawing.Point(20, 65)
+$userListLabel.Location = New-Object System.Drawing.Point(20, 85) # Y = 85 (was 65)
 $userListLabel.Size = New-Object System.Drawing.Size(200, 20)
 $userListLabel.Text = "Select User(s) to Investigate:"
 $userListLabel.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
 $mainForm.Controls.Add($userListLabel)
 
-# User CheckedListBox
+# User CheckedListBox - Adjusted Y position
 $userCheckedListBox = New-Object System.Windows.Forms.CheckedListBox
-$userCheckedListBox.Location = New-Object System.Drawing.Point(20, 90)
+$userCheckedListBox.Location = New-Object System.Drawing.Point(20, 110) # Y = 110 (was 90)
 $userCheckedListBox.Size = New-Object System.Drawing.Size(545, 200)
 $userCheckedListBox.CheckOnClick = $true
 $userCheckedListBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
@@ -413,17 +450,17 @@ $userCheckedListBox.add_ItemCheck({
 })
 $mainForm.Controls.Add($userCheckedListBox)
 
-# Log Duration Label
+# Log Duration Label - Adjusted Y position
 $logDurationLabel = New-Object System.Windows.Forms.Label
-$logDurationLabel.Location = New-Object System.Drawing.Point(20, 305)
+$logDurationLabel.Location = New-Object System.Drawing.Point(20, 325) # Y = 325 (was 305)
 $logDurationLabel.Size = New-Object System.Drawing.Size(150, 20)
 $logDurationLabel.Text = "Log History (Days):"
 $logDurationLabel.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
 $mainForm.Controls.Add($logDurationLabel)
 
-# Log Duration NumericUpDown Control
+# Log Duration NumericUpDown Control - Adjusted Y position
 $logDurationNumericUpDown = New-Object System.Windows.Forms.NumericUpDown
-$logDurationNumericUpDown.Location = New-Object System.Drawing.Point(170, 305)
+$logDurationNumericUpDown.Location = New-Object System.Drawing.Point(170, 325) # Y = 325 (was 305)
 $logDurationNumericUpDown.Size = New-Object System.Drawing.Size(60, 25)
 $logDurationNumericUpDown.Minimum = 1
 $logDurationNumericUpDown.Maximum = 30
@@ -431,9 +468,9 @@ $logDurationNumericUpDown.Value = 7
 $logDurationNumericUpDown.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
 $mainForm.Controls.Add($logDurationNumericUpDown)
 
-# Warning Label for Duration
+# Warning Label for Duration - Adjusted Y position
 $durationWarningLabel = New-Object System.Windows.Forms.Label
-$durationWarningLabel.Location = New-Object System.Drawing.Point(240, 308)
+$durationWarningLabel.Location = New-Object System.Drawing.Point(240, 328) # Y = 328 (was 308)
 $durationWarningLabel.Size = New-Object System.Drawing.Size(325, 20)
 $durationWarningLabel.Text = ""
 $durationWarningLabel.ForeColor = [System.Drawing.Color]::OrangeRed
@@ -442,24 +479,42 @@ $mainForm.Controls.Add($durationWarningLabel)
 
 $logDurationNumericUpDown.add_ValueChanged({
     if ($logDurationNumericUpDown.Value -gt 7) {
-        $durationWarningLabel.Text = "Note: >7 days requires Entra ID P1/P2 license."
+        $warnText = "Note: >7 days requires Entra ID P1/P2 license."
+        if ($script:hasPremiumLicense) {
+             $warnText += " (License Detected)"
+             $durationWarningLabel.ForeColor = [System.Drawing.Color]::DarkGreen 
+        } else {
+             $warnText += " (License NOT Detected)"
+             $durationWarningLabel.ForeColor = [System.Drawing.Color]::OrangeRed 
+        }
+        $durationWarningLabel.Text = $warnText
     } else {
         $durationWarningLabel.Text = ""
     }
 })
-if ($logDurationNumericUpDown.Value -gt 7) { $durationWarningLabel.Text = "Note: >7 days requires Entra ID P1/P2 license." }
+if ($logDurationNumericUpDown.Value -gt 7) { 
+    $warnText = "Note: >7 days requires Entra ID P1/P2 license."
+    if ($script:hasPremiumLicense) { 
+        $warnText += " (License Detected)" 
+        $durationWarningLabel.ForeColor = [System.Drawing.Color]::DarkGreen
+    } else { 
+        $warnText += " (License NOT Detected)" 
+        $durationWarningLabel.ForeColor = [System.Drawing.Color]::OrangeRed
+    }
+    $durationWarningLabel.Text = $warnText
+}
 
-# Output Folder Label
+# Output Folder Label - Adjusted Y position
 $outputFolderLabel = New-Object System.Windows.Forms.Label
-$outputFolderLabel.Location = New-Object System.Drawing.Point(20, 345)
+$outputFolderLabel.Location = New-Object System.Drawing.Point(20, 365) # Y = 365 (was 345)
 $outputFolderLabel.Size = New-Object System.Drawing.Size(100, 20)
 $outputFolderLabel.Text = "Output Folder:"
 $outputFolderLabel.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left)
 $mainForm.Controls.Add($outputFolderLabel)
 
-# Output Folder TextBox
+# Output Folder TextBox - Adjusted Y position
 $outputFolderTextBox = New-Object System.Windows.Forms.TextBox
-$outputFolderTextBox.Location = New-Object System.Drawing.Point(120, 345)
+$outputFolderTextBox.Location = New-Object System.Drawing.Point(120, 365) # Y = 365 (was 345)
 $outputFolderTextBox.Size = New-Object System.Drawing.Size(345, 25)
 $outputFolderTextBox.ReadOnly = $true
 $outputFolderTextBox.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
@@ -468,9 +523,9 @@ $outputFolderTextBox.add_TextChanged({
 })
 $mainForm.Controls.Add($outputFolderTextBox)
 
-# Browse Button (for Output Folder)
+# Browse Button (for Output Folder) - Adjusted Y position
 $browseFolderButton = New-Object System.Windows.Forms.Button
-$browseFolderButton.Location = New-Object System.Drawing.Point(475, 343)
+$browseFolderButton.Location = New-Object System.Drawing.Point(475, 363) # Y = 363 (was 343)
 $browseFolderButton.Size = New-Object System.Drawing.Size(90, 27)
 $browseFolderButton.Text = "Browse..."
 $browseFolderButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right)
@@ -486,9 +541,9 @@ $browseFolderButton.add_Click({
 })
 $mainForm.Controls.Add($browseFolderButton)
 
-# Get Logs Button
+# Get Logs Button - Adjusted Y position
 $getLogsButton = New-Object System.Windows.Forms.Button
-$getLogsButton.Location = New-Object System.Drawing.Point(20, 390)
+$getLogsButton.Location = New-Object System.Drawing.Point(20, 410) # Y = 410 (was 390)
 $getLogsButton.Size = New-Object System.Drawing.Size(545, 40)
 $getLogsButton.Text = "Get Sign-in Logs for Selected Users"
 $getLogsButton.Font = New-Object System.Drawing.Font("Microsoft Sans Serif", 10, [System.Drawing.FontStyle]::Bold)
@@ -521,7 +576,7 @@ $getLogsButton.add_Click({
     $connectButton.Enabled = $false 
     $disconnectButton.Enabled = $false
     $logDurationNumericUpDown.Enabled = $false
-    if ($openFileButton) { $openFileButton.Enabled = $false } # Disable open file button during processing
+    if ($openFileButton) { $openFileButton.Enabled = $false } 
 
     $allLogs = @()
     $errorOccurred = $false
@@ -648,7 +703,7 @@ $getLogsButton.add_Click({
         $connectButton.Enabled = $true   
         $disconnectButton.Enabled = $true 
         $logDurationNumericUpDown.Enabled = $true
-        # Enable open file button only if XLSX was successfully created and path is stored
+        
         if ($script:lastExportedXlsxPath -and (Test-Path $script:lastExportedXlsxPath)) {
             if ($openFileButton) { $openFileButton.Enabled = $true }
         } else {
@@ -669,12 +724,12 @@ $getLogsButton.add_Click({
 })
 $mainForm.Controls.Add($getLogsButton)
 
-# Open Last Exported File Button
+# Open Last Exported File Button - Adjusted Y position
 $openFileButton = New-Object System.Windows.Forms.Button
-$openFileButton.Location = New-Object System.Drawing.Point(20, 440) # Position below Get Logs button
+$openFileButton.Location = New-Object System.Drawing.Point(20, 460) # Y = 460 (was 440)
 $openFileButton.Size = New-Object System.Drawing.Size(545, 30)
 $openFileButton.Text = "Open Last Exported File"
-$openFileButton.Enabled = $false # Initially disabled
+$openFileButton.Enabled = $false 
 $openFileButton.Anchor = ([System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right)
 $openFileButton.add_Click({
     param($sender, $e)
