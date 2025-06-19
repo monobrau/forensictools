@@ -1,87 +1,407 @@
-# Entra ID Forensic Log Fetcher GUI (v3.4)
+# 🔍 Entra Investigator
 
-A PowerShell script with a graphical user interface (GUI) designed to assist with forensic analysis by fetching sign-in logs for specified Entra ID (formerly Azure AD) user accounts and exporting them to a formatted Excel (XLSX) file.
+**A comprehensive PowerShell GUI tool for investigating Microsoft Entra ID (Azure AD) accounts during security incidents, compliance audits, and user analysis.**
 
-## Description
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
+[![Microsoft Graph](https://img.shields.io/badge/Microsoft%20Graph%20SDK-Required-green.svg)](https://docs.microsoft.com/en-us/graph/powershell/installation)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/Version-6.0-brightgreen.svg)](CHANGELOG.md)
 
-This tool provides a simple Windows Forms interface to:
-* Connect to Microsoft Graph.
-* Automatically load all Entra ID users.
-* Allow selection of one or more users for investigation.
-* Specify a time duration (1-30 days) for log retrieval.
-* Export sign-in logs to an XLSX file, which includes:
-    * The tenant's primary domain name (or a fallback identifier) in the filename.
-    * Auto-fitted column widths.
-    * A bolded header row.
-    * Rows highlighted in yellow where the sign-in country is "United States".
-* Provide a button to disconnect the Graph session.
-* Provide a button to open the last successfully exported XLSX file.
+---
 
-## Features
+## 📋 Table of Contents
 
-* **Graphical User Interface:** Easy-to-use GUI built with Windows Forms.
-* **Microsoft Graph Integration:** Connects securely to Microsoft Graph using the official PowerShell SDK.
-* **Automatic User Loading:** Loads a list of all users from your Entra ID tenant immediately after successful connection.
-* **User Selection:** Allows selecting one or more users for log retrieval via a checklist.
-* **Custom Duration:** Specify the number of past days (1-30) of sign-in history to retrieve.
-    * Includes a warning that retrieving logs beyond 7 days typically requires an Entra ID P1 or P2 license.
-* **Folder Selection:** Choose a destination folder for the exported log files.
-* **Robust Filtering:** Fetches logs using the user's immutable Object ID for better reliability.
-* **Intelligent Filenaming:** Includes the tenant's primary domain name (or UPN-derived domain, or Tenant ID as fallback) in the exported XLSX filename for easy identification.
-* **Formatted XLSX Export:**
-    * Exports logs first to a temporary CSV, then converts to XLSX.
-    * **Auto-fits column widths** in the XLSX file.
-    * Makes the **header row bold**.
-    * **Highlights rows in yellow** where the `Country` is "United States".
-    * Expands complex properties like `DeviceDetail` and `Status` into readable columns, including MFA-related details from `Status.AdditionalDetails`.
-* **Session Management:** Includes a "Disconnect from Graph" button to terminate the session and clear user data.
-* **Open Last File:** A button to quickly open the most recently generated XLSX report.
+- [Features](#-features)
+- [Screenshots](#-screenshots)
+- [Prerequisites](#-prerequisites)
+- [Installation](#-installation)
+- [Quick Start](#-quick-start)
+- [Detailed Usage](#-detailed-usage)
+- [Required Permissions](#-required-permissions)
+- [Use Cases](#-use-cases)
+- [Troubleshooting](#-troubleshooting)
+- [Contributing](#-contributing)
+- [License](#-license)
+- [Changelog](#-changelog)
 
-## Prerequisites
+---
 
-* **PowerShell:** Version 5.1 or later.
-* **Microsoft Graph PowerShell SDK:** The script requires the following modules:
-    * `Microsoft.Graph.Users`
-    * `Microsoft.Graph.Reports`
-    * `Microsoft.Graph.Identity.DirectoryManagement`
-* **Microsoft Excel:** **Must be installed** on the machine running the script for the XLSX conversion and formatting features to work.
-* **Entra ID Permissions:** The account running the script needs the following delegated permissions granted in Microsoft Graph/Entra ID:
-    * `User.Read.All` (to list users)
-    * `AuditLog.Read.All` (to read sign-in logs)
-    * `Organization.Read.All` (to determine tenant domain for filename)
-* **Operating System:** Windows (due to Windows Forms GUI and Excel COM automation).
+## 🚀 Features
 
-## Installation
+### **Core Investigation Capabilities**
 
-1.  **Save the Script:** Download or save the script file (e.g., `entrainvestigator.ps1`) to your local machine.
-2.  **Install Modules:** If you don't have the required Microsoft Graph modules installed, run the following command in PowerShell (as the user who will run the script):
-    ```powershell
-    Install-Module Microsoft.Graph.Users, Microsoft.Graph.Reports, Microsoft.Graph.Identity.DirectoryManagement -Scope CurrentUser -Repository PSGallery -Force
-    ```
-    The script also includes a check and will prompt for installation if modules are missing.
+- **🔐 Comprehensive MFA Analysis**
+  - Per-user MFA method detection
+  - Security Defaults status checking
+  - Conditional Access policy evaluation
+  - Overall protection status with risk indicators
 
-## Usage
+- **👤 Enhanced User Analysis**
+  - License type detection (Premium vs Standard)
+  - Account status monitoring (Enabled/Disabled)
+  - Password age analysis
+  - Administrative role identification
+  - Group membership counting
 
-1.  **Run the Script:** Open PowerShell, navigate to the directory where you saved the script, and run it:
-    ```powershell
-    .\entrainvestigator.ps1
-    ```
-2.  **Connect & Load Users:** Click the "Connect & Load Users" button. A Microsoft login window will appear. Authenticate using an account with the required permissions. Users will be loaded automatically. The script will also attempt to determine your tenant's domain for the output filename.
-3.  **Select Users:** Check the boxes next to the users you want to investigate.
-4.  **Set Duration:** Enter the number of past days (1-30) for which you want to retrieve logs. Note the license warning if selecting more than 7 days.
-5.  **Choose Output Folder:** Click "Browse..." and select a destination folder for the XLSX file.
-6.  **Get Logs:** Click the "Get Sign-in Logs for Selected Users" button.
-7.  **Monitor Progress:** The status bar at the bottom will show the script's progress. The PowerShell console window will also display detailed messages, including any warnings or errors encountered.
-8.  **Review Output:** Upon completion, a message box will confirm the successful export and formatting of the XLSX file.
-9.  **Open File (Optional):** Click the "Open Last Exported File" button to launch the generated report in Excel.
-10. **Disconnect (Optional):** Click "Disconnect from Graph" to end the session. This will clear the user list and disable log fetching until you reconnect.
+- **📊 Sign-in Log Export**
+  - Bulk sign-in log extraction for multiple users
+  - Excel export with automatic formatting
+  - Geographic location tracking
+  - Failed authentication analysis
+  - Customizable time ranges (1-30 days)
 
-## Notes
+- **📝 Audit Log Investigation**
+  - Administrative activity tracking
+  - Real-time audit log analysis
+  - Filtered by specific users
+  - Export capabilities for compliance
 
-* The actual availability of sign-in logs depends on your Entra ID tenant's log retention settings and license (Free = 7 days, P1/P2 = 30 days by default, potentially longer if configured with Log Analytics).
-* Error handling is included, but ensure the account running the script has sufficient permissions and network connectivity to Microsoft Graph endpoints. Check the console output for detailed error messages if issues occur, especially related to Excel COM automation if Excel is not properly installed or accessible.
-* If Excel is not installed or accessible, the script will export a CSV file, but the XLSX conversion and formatting will fail. The CSV file will be retained in this case.
+- **🎯 User Details & Roles**
+  - Complete user profile information
+  - Active directory role assignments
+  - Group membership details
+  - Account status and settings
 
-## License
+### **Export & Reporting**
 
-Consider adding a license file (e.g., MIT License) if you plan to share this script publicly.
+- **📄 Multiple Export Formats**: CSV, XLSX, TXT
+- **🎨 Formatted Excel Output**: Automatic column sizing, highlighting
+- **📋 Compliance Ready**: Export formats suitable for audits
+- **🔄 Bulk Operations**: Process multiple users simultaneously
+
+---
+
+## 📸 Screenshots
+
+### Main Interface
+*User selection and analysis tools*
+
+### MFA Analysis Tab
+*Comprehensive multi-factor authentication status checking*
+
+### Sign-in Logs Export
+*Bulk log extraction with Excel formatting*
+
+---
+
+## 🔧 Prerequisites
+
+### **System Requirements**
+- **Windows 10/11** or **Windows Server 2016+**
+- **PowerShell 5.1** or later
+- **Microsoft Excel** (for XLSX export functionality)
+- **Internet Connection** (for Microsoft Graph API access)
+
+### **Required PowerShell Modules**
+The tool will automatically prompt to install missing modules:
+
+```powershell
+Microsoft.Graph.Users
+Microsoft.Graph.Reports  
+Microsoft.Graph.Identity.DirectoryManagement
+Microsoft.Graph.Identity.SignIns
+```
+
+### **Microsoft Graph Permissions**
+- `User.Read.All`
+- `AuditLog.Read.All`
+- `Organization.Read.All`
+- `Directory.Read.All`
+- `Policy.Read.All`
+- `UserAuthenticationMethod.Read.All`
+
+---
+
+## 📦 Installation
+
+### **Option 1: Direct Download**
+
+1. Download the latest `Entra-Investigator.ps1` file
+2. Save to your preferred directory
+3. Run with PowerShell (see Quick Start below)
+
+### **Option 2: Git Clone**
+
+```bash
+git clone https://github.com/yourusername/entra-investigator.git
+cd entra-investigator
+```
+
+### **Option 3: PowerShell Gallery** *(Coming Soon)*
+
+```powershell
+Install-Script -Name Entra-Investigator
+```
+
+---
+
+## 🚀 Quick Start
+
+### **Step 1: Launch the Tool**
+
+```powershell
+# Navigate to the script directory
+cd C:\Path\To\Script
+
+# Execute with appropriate execution policy
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+.\Entra-Investigator.ps1
+```
+
+### **Step 2: Connect to Microsoft Graph**
+
+1. Click **"Connect & Load Users"**
+2. Sign in with appropriate administrative credentials
+3. Consent to required permissions
+4. Wait for user list to populate
+
+### **Step 3: Select Users for Investigation**
+
+- ✅ Check individual users or use **"Select All"**
+- 🔍 Click **"Analyze Selected Users"** for enhanced information display
+
+### **Step 4: Investigate Using Tabs**
+
+- **Sign-in Logs**: Export authentication data
+- **User Details**: View comprehensive user information  
+- **Audit Logs**: Check administrative activities
+- **MFA Analysis**: Evaluate security posture
+
+---
+
+## 📖 Detailed Usage
+
+### **Enhanced User Analysis**
+
+The **"Analyze Selected Users"** feature provides at-a-glance security information:
+
+```
+john.doe@company.com [P1/P2] | ✓ Enabled | Pwd: 07/24/2019 21:53:30 | Roles: Global Administrator | Groups: 5 Groups
+jane.smith@company.com [Standard] | ✗ Disabled | Pwd: Never | Roles: No Admin Roles | Groups: No Groups
+```
+
+**Legend:**
+- `[P1/P2]` = Premium License | `[Standard]` = Basic License
+- `✓ Enabled` = Active Account | `✗ Disabled` = Inactive Account
+- `Pwd:` = Last password change date
+- `Roles:` = Administrative role assignments
+- `Groups:` = Total group memberships
+
+### **MFA Analysis Deep Dive**
+
+The MFA Analysis tab provides comprehensive multi-factor authentication assessment:
+
+#### **Overall Status Examples:**
+
+✅ **Protected (Security Defaults)**
+```
+OVERALL MFA STATUS: Protected (Security Defaults)
+MFA required via Security Defaults
+
+1. PER-USER MFA: ✗ NOT ENABLED
+2. SECURITY DEFAULTS: ✓ ENABLED  
+3. CONDITIONAL ACCESS: ✗ NO
+```
+
+⚠️ **Not Protected**
+```
+OVERALL MFA STATUS: ⚠️ NOT PROTECTED
+No MFA protection detected
+
+1. PER-USER MFA: ✗ NOT ENABLED
+2. SECURITY DEFAULTS: ✗ DISABLED
+3. CONDITIONAL ACCESS: ✗ NO
+```
+
+### **Sign-in Log Export**
+
+1. **Select Users**: Choose one or more users to investigate
+2. **Set Time Range**: Configure days of history (1-30 days)
+3. **Choose Output Folder**: Select destination for export files
+4. **Export**: Click "Get Sign-in Logs & Export to XLSX"
+
+**Output Includes:**
+- User Principal Name
+- Timestamp
+- Application Used
+- IP Address & Geographic Location
+- Authentication Status
+- Failure Reasons (if applicable)
+
+### **Audit Log Investigation**
+
+Monitor administrative activities performed by specific users:
+
+- **Date/Time**: When the activity occurred
+- **Activity**: What action was performed
+- **Category**: Type of administrative action
+- **Result**: Success/Failure status
+- **Target/Object**: What was modified
+
+---
+
+## 🔐 Required Permissions
+
+### **Microsoft Graph API Permissions**
+
+| Permission | Type | Justification |
+|------------|------|---------------|
+| `User.Read.All` | Application/Delegated | Read user profiles and basic information |
+| `AuditLog.Read.All` | Application/Delegated | Access sign-in and audit logs |
+| `Organization.Read.All` | Application/Delegated | Read tenant-level settings |
+| `Directory.Read.All` | Application/Delegated | Read directory objects and relationships |
+| `Policy.Read.All` | Application/Delegated | Read conditional access and security policies |
+| `UserAuthenticationMethod.Read.All` | Application/Delegated | Read user MFA methods and settings |
+
+### **Administrative Roles Required**
+
+**Minimum Required:**
+- **Security Reader** - For audit log access
+- **Global Reader** - For comprehensive tenant information
+
+**Recommended:**
+- **Security Administrator** - For full investigation capabilities
+- **Global Administrator** - For complete access (incident response scenarios)
+
+---
+
+## 💼 Use Cases
+
+### **🚨 Security Incident Response**
+
+- **Compromised Account Investigation**: Analyze sign-in patterns, MFA status, and recent activities
+- **Privilege Escalation Detection**: Check for unexpected role assignments
+- **Lateral Movement Tracking**: Export sign-in logs for timeline analysis
+
+### **✅ Compliance Auditing**
+
+- **MFA Coverage Assessment**: Verify multi-factor authentication deployment
+- **Administrative Activity Review**: Export audit logs for compliance reporting
+- **User Access Reviews**: Bulk analysis of user permissions and status
+
+### **🔍 Routine Security Operations**
+
+- **User Onboarding Verification**: Ensure proper MFA setup for new users
+- **Periodic Access Reviews**: Bulk user analysis for role and group cleanup
+- **Password Policy Compliance**: Identify accounts with old passwords
+
+### **📊 Security Metrics & Reporting**
+
+- **MFA Adoption Rates**: Measure tenant-wide MFA deployment
+- **Administrative Activity Trends**: Track admin actions over time
+- **Geographic Access Patterns**: Identify unusual sign-in locations
+
+---
+
+## 🛠️ Troubleshooting
+
+### **Common Issues**
+
+#### **"Connect & Load Users" Button Not Working**
+```powershell
+# Verify Graph modules are installed
+Get-Module -ListAvailable Microsoft.Graph*
+
+# Manual module installation
+Install-Module Microsoft.Graph -Scope CurrentUser
+```
+
+#### **Permission Errors**
+- Ensure you have appropriate administrative roles
+- Verify all required Graph permissions are consented
+- Check tenant conditional access policies aren't blocking access
+
+#### **Excel Export Failures**
+- Verify Microsoft Excel is installed locally
+- Check file path permissions for output directory
+- Ensure Excel isn't currently running/locked
+
+#### **Empty MFA Policy Grid**
+This is **expected behavior** when:
+- Security Defaults are enabled (no CA policies needed)
+- No Conditional Access policies exist
+- User is excluded from existing policies
+
+### **Debug Mode**
+
+Enable verbose logging for troubleshooting:
+
+```powershell
+$VerbosePreference = "Continue"
+.\Entra-Investigator.ps1
+```
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
+
+### **Development Setup**
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+### **Bug Reports**
+
+Please use the [Issue Tracker](../../issues) and include:
+
+- **Environment Details**: PowerShell version, Windows version, Graph SDK version
+- **Error Messages**: Full error text and stack traces
+- **Steps to Reproduce**: Detailed reproduction steps
+- **Expected vs Actual Behavior**: What should happen vs what does happen
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+---
+
+## 📅 Changelog
+
+### **Version 6.0** *(Latest)*
+- ✨ **NEW**: Comprehensive MFA Analysis tab
+- ✨ **NEW**: Enhanced user analysis with license, status, and role information
+- 🔧 **IMPROVED**: Better audit log display with 5-column layout
+- 🔧 **IMPROVED**: Export capabilities for all analysis types
+- 🐛 **FIXED**: All event handlers now working correctly
+
+### **Version 5.5**
+- 🔧 **FIXED**: Connect & Load Users functionality restored
+- 🔧 **IMPROVED**: Audit log column definitions and display
+
+### **Version 5.4**
+- 🔧 **FIXED**: Layout stability for audit grid
+- 🔧 **IMPROVED**: Excel conversion and formatting
+
+[View Full Changelog](CHANGELOG.md)
+
+---
+
+## 🙏 Acknowledgments
+
+- **Microsoft Graph Team** - For excellent API documentation
+- **PowerShell Community** - For Windows Forms examples and best practices
+- **Security Community** - For feedback and feature requests
+
+---
+
+## 📞 Support
+
+- **Documentation**: [Wiki](../../wiki)
+- **Issues**: [GitHub Issues](../../issues)
+- **Discussions**: [GitHub Discussions](../../discussions)
+- **Security Issues**: Please email security@yourorg.com
+
+---
+
+**⭐ If this tool helps your security investigations, please star the repository!**
+
+---
+
+*Entra Investigator - Making Microsoft Entra ID security investigations efficient and comprehensive.*
