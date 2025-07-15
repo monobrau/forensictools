@@ -13,7 +13,7 @@ Permissions: Requires delegated AuditLog.Read.All, Directory.Read.All, Policy.Re
 #>
 
 # --- Configuration ---
-$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Reports")
+$requiredModules = @("Microsoft.Graph.Authentication", "Microsoft.Graph.Reports", "Microsoft.Graph.Users")
 $requiredScopes = @("AuditLog.Read.All", "Directory.Read.All", "Policy.Read.All")
 
 # --- Script-level variables ---
