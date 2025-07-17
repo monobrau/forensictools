@@ -84,6 +84,49 @@
 
 ---
 
+## 🗂️ Script Overview
+
+This toolkit includes three PowerShell scripts for Microsoft Entra ID (Azure AD) investigation and reporting:
+
+### 1. `entrainvestigator.ps1`
+A GUI-based tool for interactive investigation of Entra ID accounts. Features tabbed navigation for sign-in logs, user details, audit logs, and MFA analysis. Best for hands-on, multi-user analysis and export.
+
+**How to use:**
+```powershell
+# Run the GUI tool
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+./entrainvestigator.ps1
+```
+- Connect to Microsoft Graph, select users, and use the tabs for investigation and export.
+
+---
+
+### 2. `entrareporter.ps1`
+A command-line tool for generating comprehensive forensic reports for selected users. Supports multi-user selection, consolidated or individual Excel reports, and detailed license/MFA/audit analysis.
+
+**How to use:**
+```powershell
+# Run the forensic report generator
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+./entrareporter.ps1
+```
+- Authenticate, select users from a grid, choose report type, and save Excel and summary reports.
+
+---
+
+### 3. `auditexplorer.ps1`
+A focused tool for exporting Entra ID audit logs for selected users. Provides a Windows Forms interface for user selection and CSV export of audit activity.
+
+**How to use:**
+```powershell
+# Run the audit log explorer
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+./auditexplorer.ps1
+```
+- Connect, select users, set time range, and export audit logs to CSV.
+
+---
+
 ## 🔧 Prerequisites
 
 ### **System Requirements**
@@ -113,6 +156,8 @@ Microsoft.Graph.Identity.SignIns
 ---
 
 ## 📦 Installation
+
+Download all three scripts (`entrainvestigator.ps1`, `entrareporter.ps1`, `auditexplorer.ps1`) to your preferred directory. See usage above for how to launch each tool.
 
 ### **Option 1: Direct Download**
 
