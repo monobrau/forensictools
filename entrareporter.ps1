@@ -38,7 +38,6 @@
     Forces consolidated report generation for all selected users.
 
 .NOTES
-    Author: Enhanced Version
     Version: 4.0
     - Enhanced license detection with comprehensive SKU mapping and user-level license analysis
     - Added multi-user selection capability
@@ -862,9 +861,9 @@ if ($ConsolidatedReport) {
         $userData = Get-UserForensicData -User $user -UserIndex $userIndex -TotalUsers $userCount -TenantLicenseInfo $tenantLicenseInfo
         if ($userData) {
             # Collect summary info for this user
-            $profile = $userData["User Profile"]
+            $userProfile = $userData["User Profile"]
             $mfa = $userData["MFA Status"]
-            $lastSignIn = $profile.LastSignIn
+            $lastSignIn = $userProfile.LastSignIn
             $isDormant = $false
             if ($lastSignIn -and $lastSignIn -ne "Never" -and $lastSignIn -ne "Unknown") {
                 $daysSinceSignIn = (New-TimeSpan -Start ([datetime]::ParseExact($lastSignIn, 'MM/dd/yyyy HH:mm:ss', $null)) -End (Get-Date)).Days
@@ -876,14 +875,14 @@ if ($ConsolidatedReport) {
             $isPrivileged = $adminRoles.Count -gt 0
             $userSheetPrefix = $user.DisplayName
             $userSummary = [PSCustomObject]@{
-                DisplayName = $profile.DisplayName
-                UserPrincipalName = $profile.UserPrincipalName
+                DisplayName = $userProfile.DisplayName
+                UserPrincipalName = $userProfile.UserPrincipalName
                 MFAStatus = $mfa.OverallStatus
                 LastSignIn = $lastSignIn
                 Dormant = if ($isDormant) { "Yes" } else { "No" }
                 Privileged = if ($isPrivileged) { "Yes" } else { "No" }
                 SheetLink = "#'$userSheetPrefix - User Profile'!A1"
-                AdminPortal = "https://admin.microsoft.com/Adminportal/Home#/users/$($profile.Id)"
+                AdminPortal = "https://admin.microsoft.com/Adminportal/Home#/users/$($userProfile.Id)"
             }
             $userSummaries += $userSummary
             foreach ($dataType in $userData.Keys) {
@@ -1042,9 +1041,9 @@ else {
                 Start-Process -FilePath $individualPath
             }
             # Ensure user summary is added for individual reports
-            $profile = $userData["User Profile"]
+            $userProfile = $userData["User Profile"]
             $mfa = $userData["MFA Status"]
-            $lastSignIn = $profile.LastSignIn
+            $lastSignIn = $userProfile.LastSignIn
             $isDormant = $false
             if ($lastSignIn -and $lastSignIn -ne "Never" -and $lastSignIn -ne "Unknown") {
                 $daysSinceSignIn = (New-TimeSpan -Start ([datetime]::ParseExact($lastSignIn, 'MM/dd/yyyy HH:mm:ss', $null)) -End (Get-Date)).Days
@@ -1055,13 +1054,13 @@ else {
             $adminRoles = $userData["Admin Roles"] | Where-Object { $_.RoleName -ne "None" }
             $isPrivileged = $adminRoles.Count -gt 0
             $userSummary = [PSCustomObject]@{
-                DisplayName = $profile.DisplayName
-                UserPrincipalName = $profile.UserPrincipalName
+                DisplayName = $userProfile.DisplayName
+                UserPrincipalName = $userProfile.UserPrincipalName
                 MFAStatus = $mfa.OverallStatus
                 LastSignIn = $lastSignIn
                 Dormant = if ($isDormant) { "Yes" } else { "No" }
                 Privileged = if ($isPrivileged) { "Yes" } else { "No" }
-                AdminPortal = "https://admin.microsoft.com/Adminportal/Home#/users/$($profile.Id)"
+                AdminPortal = "https://admin.microsoft.com/Adminportal/Home#/users/$($userProfile.Id)"
             }
             $allUserSummaries += $userSummary
         }

@@ -3,7 +3,6 @@
 A PowerShell script with a GUI to check and enable Entra ID auditing, and to download audit logs for all or specific users.
 
 .NOTES
-Author: Gemini
 Date: 2025-07-15
 Version: 1.1 (Added open file button)
 Requires:
@@ -167,7 +166,7 @@ $openCsvButton.Enabled = $false
 $downloadGroupBox.Controls.Add($openCsvButton)
 
 # --- Functions for Core Logic ---
-Function Check-AuditStatus {
+Function Test-AuditStatus {
     $mainForm.Cursor = 'WaitCursor'
     $statusLabel.Text = "Checking audit status..."
     try {
@@ -200,7 +199,7 @@ Function Enable-Auditing {
     $statusLabel.Text = "Attempting to enable auditing..."
     try {
         [System.Windows.Forms.MessageBox]::Show("To enable Entra ID auditing, your tenant must have a valid license (e.g., Entra ID P1 or P2).`n`nAuditing will begin automatically once a valid license is applied. There is no specific 'enable' button via the Graph API for general auditing; it is license-activated.", "How to Enable Auditing", 'OK', 'Information')
-        Check-AuditStatus
+        Test-AuditStatus
     } catch {
         $statusLabel.Text = "Error."
         [System.Windows.Forms.MessageBox]::Show("An error occurred: $($_.Exception.Message)", "Error", 'OK', 'Error')
@@ -209,7 +208,7 @@ Function Enable-Auditing {
     }
 }
 
-Function Load-Users {
+Function Get-Users {
     $mainForm.Cursor = 'WaitCursor'
     $statusLabel.Text = "Fetching all users..."
     try {
@@ -231,7 +230,7 @@ Function Load-Users {
     }
 }
 
-Function Download-Logs {
+Function Export-Logs {
     param(
         [System.Collections.ArrayList]$UserPrincipalNames
     )
@@ -325,8 +324,8 @@ $connectButton.add_Click({
         $script:lastExportedCsvPath = $null
         $openCsvButton.Enabled = $false
         
-        if (Check-AuditStatus) {
-            Load-Users
+        if (Test-AuditStatus) {
+            Get-Users
         }
     } catch {
         $statusLabel.Text = "Connection failed."
@@ -341,8 +340,8 @@ $enableAuditButton.add_Click({
 })
 
 $selectAllCheckbox.add_CheckedChanged({
-    param($sender, $e)
-    $isChecked = $sender.Checked
+    param($eventSender, $e)
+    $isChecked = $eventSender.Checked
     for ($i = 0; $i -lt $userCheckedListBox.Items.Count; $i++) {
         $userCheckedListBox.SetItemChecked($i, $isChecked)
     }
@@ -355,7 +354,7 @@ $userCheckedListBox.add_ItemCheck({
 })
 
 $downloadAllButton.add_Click({
-    Download-Logs -UserPrincipalNames $null
+    Export-Logs -UserPrincipalNames $null
 })
 
 $downloadSelectedButton.add_Click({
@@ -364,7 +363,7 @@ $downloadSelectedButton.add_Click({
         [System.Windows.Forms.MessageBox]::Show("Please select at least one user from the list.", "No Users Selected", "OK", "Warning")
         return
     }
-    Download-Logs -UserPrincipalNames $selectedUsers
+    Export-Logs -UserPrincipalNames $selectedUsers
 })
 
 # *** NEW EVENT HANDLER ***
