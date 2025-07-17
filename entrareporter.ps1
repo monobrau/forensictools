@@ -225,6 +225,56 @@ function Get-UserLicenseDetails {
 
 # --- SCRIPT INITIALIZATION AND PREREQUISITE CHECK ---
 
+# Function to bring windows to foreground
+function Set-WindowToForeground {
+    param([string]$WindowTitle = "")
+    
+    try {
+        Add-Type -TypeDefinition @"
+            using System;
+            using System.Runtime.InteropServices;
+            public class Win32 {
+                [DllImport("user32.dll")]
+                public static extern bool SetForegroundWindow(IntPtr hWnd);
+                
+                [DllImport("user32.dll")]
+                public static extern IntPtr GetForegroundWindow();
+                
+                [DllImport("user32.dll")]
+                public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+                
+                [DllImport("kernel32.dll")]
+                public static extern IntPtr GetConsoleWindow();
+                
+                [DllImport("user32.dll")]
+                public static extern bool FlashWindow(IntPtr hWnd, bool bInvert);
+            }
+"@
+        
+        # Get current console window and bring it to front
+        $consoleWindow = [Win32]::GetConsoleWindow()
+        if ($consoleWindow -ne [IntPtr]::Zero) {
+            [Win32]::ShowWindow($consoleWindow, 9) # SW_RESTORE
+            [Win32]::SetForegroundWindow($consoleWindow)
+            [Win32]::FlashWindow($consoleWindow, $true)
+        }
+        
+        # Also try to bring PowerShell ISE to front if running there
+        $iseProcess = Get-Process -Name "powershell_ise" -ErrorAction SilentlyContinue
+        if ($iseProcess) {
+            $iseProcess | ForEach-Object { $_.MainWindowHandle } | ForEach-Object {
+                [Win32]::SetForegroundWindow($_)
+            }
+        }
+        
+        Start-Sleep -Milliseconds 500
+    }
+    catch {
+        # Silently continue if window manipulation fails
+        Write-Verbose "Window focusing failed: $_"
+    }
+}
+
 Write-Host "=== Enhanced User Forensic Report Generator v4.0 ===" -ForegroundColor Magenta
 Write-Host "Checking for required PowerShell modules..." -ForegroundColor Cyan
 
@@ -285,6 +335,8 @@ if (-not $allUsers) {
 }
 
 Write-Host "Select one or more users to investigate (use Ctrl+Click for multiple selection):" -ForegroundColor Yellow
+Set-WindowToForeground
+Start-Sleep -Milliseconds 1000  # Give time for window to come to front
 $selectedUsers = $allUsers | Out-GridView -PassThru -Title "Select Users to Investigate (Ctrl+Click for multiple selection)"
 
 if (-not $selectedUsers) {
@@ -301,6 +353,7 @@ $selectedUsers | ForEach-Object { Write-Host "  - $($_.DisplayName) ($($_.UserPr
 # --- REPORT TYPE SELECTION ---
 
 if (-not $ConsolidatedReport -and $userCount -gt 1) {
+    Set-WindowToForeground
     $reportChoice = Read-Host "Generate [I]ndividual reports or [C]onsolidated report? (I/C, default: I)"
     $ConsolidatedReport = ($reportChoice -eq 'C' -or $reportChoice -eq 'c')
 }
@@ -315,6 +368,8 @@ if ($ConsolidatedReport) {
     $saveFileDialog.Filter = "Excel Workbook (*.xlsx)|*.xlsx"
     $saveFileDialog.FileName = "ConsolidatedForensicReport_$($userCount)Users_$(Get-Date -Format 'yyyyMMdd_HHmmss').xlsx"
     
+    Set-WindowToForeground
+    Start-Sleep -Milliseconds 500
     if ($saveFileDialog.ShowDialog() -ne 'OK') {
         Write-Warning "No output file was selected. Exiting script."
         Disconnect-MgGraph
@@ -329,6 +384,8 @@ else {
     $folderDialog.Description = "Select folder to save individual forensic reports"
     $folderDialog.ShowNewFolderButton = $true
     
+    Set-WindowToForeground
+    Start-Sleep -Milliseconds 500
     if ($folderDialog.ShowDialog() -ne 'OK') {
         Write-Warning "No output folder was selected. Exiting script."
         Disconnect-MgGraph
@@ -357,13 +414,11 @@ function Get-UserForensicData {
     try {
         Write-Host "[$UserIndex/$TotalUsers] Processing: $UserPrincipalName" -ForegroundColor Cyan
 
-        # 1. Get General User Information with License Details
-        Write-Host "  [1/11] Getting general user information and licenses..."
-        $userInfo = Get-MgUser -UserId $UserPrincipalName -Property * | 
-            Select-Object DisplayName, UserPrincipalName, Id, UserType, AccountEnabled, CreatedDateTime, 
-            SignInActivity, Mail, JobTitle, Department, OfficeLocation, UsageLocation
+        # 1. Get General User Information and Create Comprehensive User Profile
+        Write-Host "  [1/11] Getting comprehensive user information and licenses..."
+        $userInfoRaw = Get-MgUser -UserId $UserPrincipalName -Property *
         
-        # Get user-specific licenses
+        # Get user-specific licenses first for summary
         $licenseMapping = @{
             'AAD_BASIC'                    = @{ Name = 'Azure Active Directory Basic'; Tier = 'Basic'; LogRetention = 7 }
             'AAD_PREMIUM'                  = @{ Name = 'Azure Active Directory Premium P1'; Tier = 'P1'; LogRetention = 30 }
@@ -382,24 +437,173 @@ function Get-UserForensicData {
         }
         $userLicenses = Get-UserLicenseDetails -UserId $UserId -LicenseMapping $licenseMapping
         
-        $reportData.Add("User Info", $userInfo)
-        $reportData.Add("User Licenses", $userLicenses)
-
-        # 2. Get Assigned Admin Roles
-        Write-Host "  [2/11] Getting assigned admin roles..."
-        $adminRoles = Get-MgUserMemberOf -UserId $UserId -All | 
+        # We'll build admin roles and group memberships first for the summary
+        $adminRolesRaw = Get-MgUserMemberOf -UserId $UserId -All | 
             Where-Object { $_.'@odata.type' -eq '#microsoft.graph.directoryRole' } | 
             Select-Object -ExpandProperty AdditionalProperties
-        $reportData.Add("Admin Roles", $adminRoles)
-
-        # 3. Get Group Memberships
-        Write-Host "  [3/11] Getting user group memberships..."
-        $groupMemberships = Get-MgUserMemberOf -UserId $UserId -All | 
+        
+        $groupMembershipsRaw = Get-MgUserMemberOf -UserId $UserId -All | 
             Where-Object { $_.'@odata.type' -eq '#microsoft.graph.group' } | 
             Select-Object -ExpandProperty AdditionalProperties
+        
+        # Check if user has mailbox for summary
+        $hasMailbox = $false
+        try {
+            $mailboxCheck = Get-EXOMailbox -Identity $UserPrincipalName -ErrorAction Stop
+            if ($mailboxCheck) { $hasMailbox = $true }
+        }
+        catch {
+            # User has no mailbox
+        }
+        
+        # Calculate log retention for summary
+        $userLogDays = $TenantLicenseInfo.MaxLogRetention
+        if ($userLicenses) {
+            $userMaxRetention = ($userLicenses | Measure-Object LogRetention -Maximum).Maximum
+            if ($userMaxRetention -gt $userLogDays) {
+                $userLogDays = $userMaxRetention
+            }
+        }
+        
+        # Create streamlined user profile without redundancy
+        $userProfile = [PSCustomObject]@{
+            # Basic Identity
+            UserPrincipalName = $userInfoRaw.UserPrincipalName
+            DisplayName = if ($userInfoRaw.DisplayName) { $userInfoRaw.DisplayName } else { "Not Set" }
+            Id = $userInfoRaw.Id
+            UserType = if ($userInfoRaw.UserType) { $userInfoRaw.UserType } else { "Member" }
+            AccountEnabled = if ($null -ne $userInfoRaw.AccountEnabled) { $userInfoRaw.AccountEnabled } else { $false }
+            
+            # Key Dates & Activity
+            AccountCreated = if ($userInfoRaw.CreatedDateTime) { $userInfoRaw.CreatedDateTime.ToString('MM/dd/yyyy HH:mm:ss') } else { "Unknown" }
+            LastPasswordChange = if ($userInfoRaw.LastPasswordChangeDateTime) { $userInfoRaw.LastPasswordChangeDateTime.ToString('MM/dd/yyyy HH:mm:ss') } else { "Unknown" }
+            LastSignIn = if ($userInfoRaw.SignInActivity -and $userInfoRaw.SignInActivity.LastSignInDateTime) { $userInfoRaw.SignInActivity.LastSignInDateTime.ToString('MM/dd/yyyy HH:mm:ss') } else { "Never" }
+            LastNonInteractiveSignIn = if ($userInfoRaw.SignInActivity -and $userInfoRaw.SignInActivity.LastNonInteractiveSignInDateTime) { $userInfoRaw.SignInActivity.LastNonInteractiveSignInDateTime.ToString('MM/dd/yyyy HH:mm:ss') } else { "Never" }
+            
+            # Contact Information
+            Mail = if ($userInfoRaw.Mail) { $userInfoRaw.Mail } else { "Not Set" }
+            MailNickname = if ($userInfoRaw.MailNickname) { $userInfoRaw.MailNickname } else { "Not Set" }
+            MobilePhone = if ($userInfoRaw.MobilePhone) { $userInfoRaw.MobilePhone } else { "Not Set" }
+            BusinessPhones = if ($userInfoRaw.BusinessPhones -and $userInfoRaw.BusinessPhones.Count -gt 0) { ($userInfoRaw.BusinessPhones -join ", ") } else { "Not Set" }
+            
+            # Organization
+            JobTitle = if ($userInfoRaw.JobTitle) { $userInfoRaw.JobTitle } else { "Not Set" }
+            Department = if ($userInfoRaw.Department) { $userInfoRaw.Department } else { "Not Set" }
+            CompanyName = if ($userInfoRaw.CompanyName) { $userInfoRaw.CompanyName } else { "Not Set" }
+            OfficeLocation = if ($userInfoRaw.OfficeLocation) { $userInfoRaw.OfficeLocation } else { "Not Set" }
+            Manager = if ($userInfoRaw.Manager) { $userInfoRaw.Manager } else { "Not Set" }
+            
+            # Location & Preferences
+            UsageLocation = if ($userInfoRaw.UsageLocation) { $userInfoRaw.UsageLocation } else { "Not Set" }
+            PreferredLanguage = if ($userInfoRaw.PreferredLanguage) { $userInfoRaw.PreferredLanguage } else { "Not Set" }
+            City = if ($userInfoRaw.City) { $userInfoRaw.City } else { "Not Set" }
+            State = if ($userInfoRaw.State) { $userInfoRaw.State } else { "Not Set" }
+            Country = if ($userInfoRaw.Country) { $userInfoRaw.Country } else { "Not Set" }
+            
+            # Security & Compliance
+            AdminRolesSummary = if ($adminRolesRaw -and $adminRolesRaw.Count -gt 0) { ($adminRolesRaw | ForEach-Object { $_.displayName }) -join "; " } else { "None" }
+            GroupMembershipCount = if ($groupMembershipsRaw) { $groupMembershipsRaw.Count } else { 0 }
+            LicenseTier = if ($userLicenses -and $userLicenses.Count -gt 0) { ($userLicenses | Measure-Object Tier -Maximum).Maximum } else { "None" }
+            SignInLogsRetention = "${userLogDays} days"
+            ExchangeMailbox = if ($hasMailbox) { "Yes" } else { "No" }
+            PasswordPolicies = if ($userInfoRaw.PasswordPolicies) { $userInfoRaw.PasswordPolicies } else { "None" }
+            
+            # Directory Sync
+            OnPremisesSyncEnabled = if ($null -ne $userInfoRaw.OnPremisesSyncEnabled) { $userInfoRaw.OnPremisesSyncEnabled } else { $false }
+            OnPremisesLastSync = if ($userInfoRaw.OnPremisesLastSyncDateTime) { $userInfoRaw.OnPremisesLastSyncDateTime.ToString('MM/dd/yyyy HH:mm:ss') } else { "Never" }
+            OnPremisesDomainName = if ($userInfoRaw.OnPremisesDomainName) { $userInfoRaw.OnPremisesDomainName } else { "Not Set" }
+            OnPremisesSamAccountName = if ($userInfoRaw.OnPremisesSamAccountName) { $userInfoRaw.OnPremisesSamAccountName } else { "Not Set" }
+            
+            # Additional Details
+            CreationType = if ($userInfoRaw.CreationType) { $userInfoRaw.CreationType } else { "Not Set" }
+            ExternalUserState = if ($userInfoRaw.ExternalUserState) { $userInfoRaw.ExternalUserState } else { "Not Applicable" }
+            ProxyAddressCount = if ($userInfoRaw.ProxyAddresses) { $userInfoRaw.ProxyAddresses.Count } else { 0 }
+            ShowInAddressList = if ($null -ne $userInfoRaw.ShowInAddressList) { $userInfoRaw.ShowInAddressList } else { $true }
+        }
+        
+        $reportData.Add("User Profile", $userProfile)
+        $reportData.Add("User Licenses", $userLicenses)
+        Write-Host "  [3/12] Getting assigned admin roles..."
+        $adminRolesRaw = Get-MgUserMemberOf -UserId $UserId -All | 
+            Where-Object { $_.'@odata.type' -eq '#microsoft.graph.directoryRole' } | 
+            Select-Object -ExpandProperty AdditionalProperties
+        
+        # Enhanced admin roles with PIM status check
+        $adminRoles = @()
+        foreach ($role in $adminRolesRaw) {
+            $adminRoles += [PSCustomObject]@{
+                RoleName = $role.displayName
+                RoleId = $role.id
+                Description = $role.description
+                Status = "Active"
+                Type = "Permanent"
+            }
+        }
+        
+        # Check for PIM eligible roles
+        try {
+            # Only attempt PIM lookup if tenant has premium licensing
+            $pimEligibleRoles = @()
+            if ($tenantLicenseInfo.HighestTier -eq 'P2') {
+                $pimEligibleRoles = Get-MgRoleManagementDirectoryRoleEligibilitySchedule -Filter "principalId eq '$UserId'" -All -ErrorAction Stop
+                foreach ($pimRole in $pimEligibleRoles) {
+                    $roleDetails = Get-MgDirectoryRoleTemplate -DirectoryRoleTemplateId $pimRole.RoleDefinitionId -ErrorAction Stop
+                    $adminRoles += [PSCustomObject]@{
+                        RoleName = $roleDetails.DisplayName
+                        RoleId = $pimRole.RoleDefinitionId
+                        Description = $roleDetails.Description
+                        Status = "PIM-Eligible but not active"
+                        Type = "Eligible"
+                    }
+                }
+            }
+        }
+        catch {
+            # Silently skip PIM roles if not available (tenant doesn't have premium licensing)
+            Write-Verbose "PIM role checking skipped: $_"
+        }
+        
+        if ($adminRoles.Count -eq 0) {
+            $adminRoles = @([PSCustomObject]@{
+                RoleName = "None"
+                Status = "No administrative roles assigned"
+                Type = "N/A"
+            })
+        }
+        
+        $reportData.Add("Admin Roles", $adminRoles)
+
+        # 4. Get Enhanced Group Memberships
+        Write-Host "  [4/12] Getting user group memberships..."
+        $groupMembershipsRaw = Get-MgUserMemberOf -UserId $UserId -All | 
+            Where-Object { $_.'@odata.type' -eq '#microsoft.graph.group' } | 
+            Select-Object -ExpandProperty AdditionalProperties
+        
+        $groupMemberships = @()
+        foreach ($group in $groupMembershipsRaw) {
+            $groupMemberships += [PSCustomObject]@{
+                GroupName = $group.displayName
+                GroupId = $group.id
+                GroupType = $group.groupTypes -join ", "
+                Description = $group.description
+                Mail = $group.mail
+                MailEnabled = $group.mailEnabled
+                SecurityEnabled = $group.securityEnabled
+                MembershipRule = $group.membershipRule
+                MembershipRuleProcessingState = $group.membershipRuleProcessingState
+            }
+        }
+        
+        if ($groupMemberships.Count -eq 0) {
+            $groupMemberships = @([PSCustomObject]@{
+                GroupName = "None"
+                Status = "No group memberships found"
+            })
+        }
+        
         $reportData.Add("Group Memberships", $groupMemberships)
 
-        # 4. Enhanced Sign-in Logs with User-Specific License Check
+        # 5. Enhanced Sign-in Logs with User-Specific License Check
         $userLogDays = $TenantLicenseInfo.MaxLogRetention
         if ($userLicenses) {
             $userMaxRetention = ($userLicenses | Measure-Object LogRetention -Maximum).Maximum
@@ -408,11 +612,11 @@ function Get-UserForensicData {
             }
         }
 
-        Write-Host "  [4/11] Getting user sign-in logs (last $userLogDays days based on license analysis)..."
+        Write-Host "  [5/12] Getting user sign-in logs (last $userLogDays days based on license analysis)..."
         try {
             $startDate = (Get-Date).AddDays(-$userLogDays).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
             $filter = "userPrincipalName eq '$UserPrincipalName' and createdDateTime ge $startDate"
-            $signInLogsRaw = Get-MgAuditLogSignIn -Filter $filter -All -ErrorAction Stop
+            $signInLogsRaw = Get-MgAuditLogSignIn -Filter $filter -Top 50 -ErrorAction Stop
             
             if ($null -ne $signInLogsRaw) {
                 $signInLogsFormatted = $signInLogsRaw | Select-Object CreatedDateTime, UserPrincipalName, AppDisplayName, 
@@ -453,15 +657,7 @@ function Get-UserForensicData {
         $reportData.Add("Directory Audits", $auditLogsFormatted)
 
         # --- EXCHANGE ONLINE DATA COLLECTION ---
-        Write-Host "  [6/11] Checking for Exchange Online mailbox..."
-        $hasMailbox = $false
-        try {
-            $mailboxCheck = Get-EXOMailbox -Identity $UserPrincipalName -ErrorAction Stop
-            if ($mailboxCheck) { $hasMailbox = $true }
-        }
-        catch {
-            # User has no mailbox
-        }
+        Write-Host "  [6/11] Confirming Exchange Online mailbox status..."
 
         if ($hasMailbox) {
             Write-Host "    Mailbox found. Proceeding with Exchange data collection." -ForegroundColor Green
@@ -649,6 +845,7 @@ if ($ConsolidatedReport) {
     # Consolidated Report Generation
     Write-Host "Generating consolidated report for $userCount users..." -ForegroundColor Cyan
     $consolidatedData = @{}
+    $userSummaries = @()
     
     # Add tenant license information to consolidated report
     try {
@@ -663,8 +860,32 @@ if ($ConsolidatedReport) {
     $userIndex = 1
     foreach ($user in $selectedUsers) {
         $userData = Get-UserForensicData -User $user -UserIndex $userIndex -TotalUsers $userCount -TenantLicenseInfo $tenantLicenseInfo
-        
         if ($userData) {
+            # Collect summary info for this user
+            $profile = $userData["User Profile"]
+            $mfa = $userData["MFA Status"]
+            $lastSignIn = $profile.LastSignIn
+            $isDormant = $false
+            if ($lastSignIn -and $lastSignIn -ne "Never" -and $lastSignIn -ne "Unknown") {
+                $daysSinceSignIn = (New-TimeSpan -Start ([datetime]::ParseExact($lastSignIn, 'MM/dd/yyyy HH:mm:ss', $null)) -End (Get-Date)).Days
+                if ($daysSinceSignIn -ge 30) { $isDormant = $true }
+            } else {
+                $isDormant = $true
+            }
+            $adminRoles = $userData["Admin Roles"] | Where-Object { $_.RoleName -ne "None" }
+            $isPrivileged = $adminRoles.Count -gt 0
+            $userSheetPrefix = $user.DisplayName
+            $userSummary = [PSCustomObject]@{
+                DisplayName = $profile.DisplayName
+                UserPrincipalName = $profile.UserPrincipalName
+                MFAStatus = $mfa.OverallStatus
+                LastSignIn = $lastSignIn
+                Dormant = if ($isDormant) { "Yes" } else { "No" }
+                Privileged = if ($isPrivileged) { "Yes" } else { "No" }
+                SheetLink = "#'$userSheetPrefix - User Profile'!A1"
+                AdminPortal = "https://admin.microsoft.com/Adminportal/Home#/users/$($profile.Id)"
+            }
+            $userSummaries += $userSummary
             foreach ($dataType in $userData.Keys) {
                 $sheetName = "$($user.DisplayName) - $dataType"
                 try {
@@ -677,11 +898,116 @@ if ($ConsolidatedReport) {
         }
         $userIndex++
     }
-    
-    $success = Export-ForensicReport -ReportData $consolidatedData -OutputPath $OutputPath
-    if ($success) {
-        Write-Host "`nConsolidated report generated successfully!" -ForegroundColor Green
-        Write-Host "Report saved to: $OutputPath" -ForegroundColor Yellow
+    # Add summary worksheet
+    $consolidatedData = @{'Summary' = $userSummaries} + $consolidatedData
+    # Export with conditional formatting and hyperlinks
+    Write-Host "Generating Excel report at: $OutputPath (with summary and formatting)" -ForegroundColor Cyan
+    try {
+        $summaryParams = @{
+            Path = $OutputPath
+            WorksheetName = 'Summary'
+            InputObject = $userSummaries
+            AutoFilter = $true
+            AutoSize = $true
+            TableName = 'SummaryTable'
+            ConditionalFormat = @(
+                @{ Range = 'C:C'; RuleType = 'Text'; Operator = 'Equal'; Text = 'NOT PROTECTED'; ForegroundColor = 'Red' },
+                @{ Range = 'E:E'; RuleType = 'Text'; Operator = 'Equal'; Text = 'Yes'; ForegroundColor = 'Yellow' }
+            )
+        }
+        Export-Excel @summaryParams
+        # Add hyperlinks to user sheets and admin portal
+        $excel = Open-ExcelPackage -Path $OutputPath
+        $ws = $excel.Workbook.Worksheets['Summary']
+        for ($i = 2; $i -le $userSummaries.Count+1; $i++) {
+            $ws.Cells[$i,6].Hyperlink = $userSummaries[$i-2].SheetLink
+            $ws.Cells[$i,7].Hyperlink = $userSummaries[$i-2].AdminPortal
+        }
+        Close-ExcelPackage $excel
+        # Append the rest of the sheets
+        $isFirstSheet = $false
+        foreach ($sheetName in $consolidatedData.Keys) {
+            if ($sheetName -eq 'Summary') { continue }
+            $data = $consolidatedData[$sheetName]
+            $excelParams = @{
+                Path = $OutputPath
+                WorksheetName = $sheetName
+                InputObject = $data
+                AutoFilter = $true
+                AutoSize = $true
+                TableName = ($sheetName -replace '[^a-zA-Z0-9]', '').Substring(0, [Math]::Min(255, ($sheetName -replace '[^a-zA-Z0-9]', '').Length))
+            }
+            Export-Excel @excelParams -Append
+        }
+        Write-Host "Excel report with summary and formatting successfully generated!" -ForegroundColor Green
+        # 1. Automatically open the output file
+        Start-Process -FilePath $OutputPath
+        # 2. Generate plain-text summary for ticketing
+        $summaryText = "=== Forensic User Summary ===`r`n"
+        foreach ($u in $userSummaries) {
+            $summaryText += "User: $($u.DisplayName) <$($u.UserPrincipalName)>`r`n"
+            $summaryText += "  MFA Status: $($u.MFAStatus)`r`n"
+            $summaryText += "  Last Sign-In: $($u.LastSignIn)`r`n"
+            $summaryText += "  Dormant: $($u.Dormant)`r`n"
+            $summaryText += "  Privileged: $($u.Privileged)`r`n"
+            # Inbox Rules summary
+            $userData = $null
+            foreach ($ud in $selectedUsers) { if ($ud.DisplayName -eq $u.DisplayName) { $userData = Get-UserForensicData -User $ud -UserIndex 1 -TotalUsers 1 -TenantLicenseInfo $tenantLicenseInfo; break } }
+            if ($userData -and $userData.ContainsKey("Inbox Rules (Detailed)")) {
+                $rules = $userData["Inbox Rules (Detailed)"]
+                if ($rules -and $rules.Count -gt 0) {
+                    $summaryText += "  Inbox Rules:`r`n"
+                    foreach ($rule in $rules) {
+                        $actions = @()
+                        if ($rule.ForwardTo) { $actions += "ForwardTo: $($rule.ForwardTo)" }
+                        if ($rule.RedirectTo) { $actions += "RedirectTo: $($rule.RedirectTo)" }
+                        if ($rule.DeleteMessage) { $actions += "DeleteMessage" }
+                        if ($rule.MoveToFolderName) { $actions += "MoveTo: $($rule.MoveToFolderName)" }
+                        $actionSummary = if ($actions.Count -gt 0) { $actions -join ", " } else { "No special action" }
+                        $summaryText += "    - Rule: '$($rule.RuleName)', Enabled: $($rule.Enabled), Action: $actionSummary`r`n"
+                    }
+                } else {
+                    $summaryText += "  Inbox Rules: None`r`n"
+                }
+            } else {
+                $summaryText += "  Inbox Rules: Not available`r`n"
+            }
+            # Sign-in summary
+            if ($userData -and $userData.ContainsKey("Sign-in Logs")) {
+                $signins = $userData["Sign-in Logs"] | Select-Object -First 5
+                if ($signins -and $signins.Count -gt 0) {
+                    $summaryText += "  Recent Sign-Ins:`r`n"
+                    foreach ($s in $signins) {
+                        $summaryText += "    - $($s.CreatedDateTime), App: $($s.AppDisplayName), IP: $($s.IpAddress), Status: $($s.Status), Location: $($s.CountryOrRegion), Reason: $($s.FailureReason)`r`n"
+                    }
+                } else {
+                    $summaryText += "  Recent Sign-Ins: None`r`n"
+                }
+            } else {
+                $summaryText += "  Recent Sign-Ins: Not available`r`n"
+            }
+            $summaryText += "---`r`n"
+        }
+        $summaryPath = [System.IO.Path]::ChangeExtension($OutputPath, '.txt')
+        Set-Content -Path $summaryPath -Value $summaryText -Encoding UTF8
+        Write-Host "User summary saved to: $summaryPath" -ForegroundColor Yellow
+        # Show in a pop-up window for easy copy-paste
+        Add-Type -AssemblyName System.Windows.Forms
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = "Forensic User Summary (Copy for Ticket)"
+        $form.Width = 800
+        $form.Height = 600
+        $form.TopMost = $true
+        $textBox = New-Object System.Windows.Forms.TextBox
+        $textBox.Multiline = $true
+        $textBox.ReadOnly = $true
+        $textBox.ScrollBars = "Vertical"
+        $textBox.Dock = "Fill"
+        $textBox.Text = $summaryText
+        $form.Controls.Add($textBox)
+        $form.ShowDialog() | Out-Null
+    } catch {
+        Write-Error "Failed to generate the Excel report with summary. Error: $_"
     }
 }
 else {
@@ -689,10 +1015,11 @@ else {
     Write-Host "Generating individual reports for $userCount users..." -ForegroundColor Cyan
     $successCount = 0
     $userIndex = 1
-    
+    $allUserSummaries = @()
+    $userDataCache = @{}
     foreach ($user in $selectedUsers) {
         $userData = Get-UserForensicData -User $user -UserIndex $userIndex -TotalUsers $userCount -TenantLicenseInfo $tenantLicenseInfo
-        
+        $userDataCache[$user.UserPrincipalName] = $userData
         if ($userData) {
             # Add tenant license info to each individual report
             try {
@@ -711,11 +1038,103 @@ else {
             if ($success) {
                 $successCount++
                 Write-Host "Individual report generated for $($user.DisplayName)" -ForegroundColor Green
+                # 1. Automatically open the output file
+                Start-Process -FilePath $individualPath
             }
+            # Ensure user summary is added for individual reports
+            $profile = $userData["User Profile"]
+            $mfa = $userData["MFA Status"]
+            $lastSignIn = $profile.LastSignIn
+            $isDormant = $false
+            if ($lastSignIn -and $lastSignIn -ne "Never" -and $lastSignIn -ne "Unknown") {
+                $daysSinceSignIn = (New-TimeSpan -Start ([datetime]::ParseExact($lastSignIn, 'MM/dd/yyyy HH:mm:ss', $null)) -End (Get-Date)).Days
+                if ($daysSinceSignIn -ge 30) { $isDormant = $true }
+            } else {
+                $isDormant = $true
+            }
+            $adminRoles = $userData["Admin Roles"] | Where-Object { $_.RoleName -ne "None" }
+            $isPrivileged = $adminRoles.Count -gt 0
+            $userSummary = [PSCustomObject]@{
+                DisplayName = $profile.DisplayName
+                UserPrincipalName = $profile.UserPrincipalName
+                MFAStatus = $mfa.OverallStatus
+                LastSignIn = $lastSignIn
+                Dormant = if ($isDormant) { "Yes" } else { "No" }
+                Privileged = if ($isPrivileged) { "Yes" } else { "No" }
+                AdminPortal = "https://admin.microsoft.com/Adminportal/Home#/users/$($profile.Id)"
+            }
+            $allUserSummaries += $userSummary
         }
         $userIndex++
     }
-    
+    # 2. Generate plain-text summary for ticketing (all users)
+    if ($allUserSummaries.Count -gt 0) {
+        $summaryText = "=== Forensic User Summary ===`r`n"
+        $summaryText += "(Dormant: Yes = No sign-in for 30+ days, or never signed in)`r`n"
+        foreach ($u in $allUserSummaries) {
+            $summaryText += "User: $($u.DisplayName) <$($u.UserPrincipalName)>`r`n"
+            $summaryText += "  MFA Status: $($u.MFAStatus)`r`n"
+            $summaryText += "  Last Sign-In: $($u.LastSignIn)`r`n"
+            $summaryText += "  Dormant: $($u.Dormant)`r`n"
+            $summaryText += "  Privileged: $($u.Privileged)`r`n"
+            # Inbox Rules summary
+            $userData = $userDataCache[$u.UserPrincipalName]
+            if ($userData -and $userData.ContainsKey("Inbox Rules (Detailed)")) {
+                $rules = $userData["Inbox Rules (Detailed)"]
+                if ($rules -and $rules.Count -gt 0) {
+                    $summaryText += "  Inbox Rules:`r`n"
+                    foreach ($rule in $rules) {
+                        $actions = @()
+                        if ($rule.ForwardTo) { $actions += "ForwardTo: $($rule.ForwardTo)" }
+                        if ($rule.RedirectTo) { $actions += "RedirectTo: $($rule.RedirectTo)" }
+                        if ($rule.DeleteMessage) { $actions += "DeleteMessage" }
+                        if ($rule.MoveToFolderName) { $actions += "MoveTo: $($rule.MoveToFolderName)" }
+                        $actionSummary = if ($actions.Count -gt 0) { $actions -join ", " } else { "No special action" }
+                        $summaryText += "    - Rule: '$($rule.RuleName)', Enabled: $($rule.Enabled), Action: $actionSummary`r`n"
+                    }
+                } else {
+                    $summaryText += "  Inbox Rules: None`r`n"
+                }
+            } else {
+                $summaryText += "  Inbox Rules: Not available`r`n"
+            }
+            # Sign-in summary
+            if ($userData -and $userData.ContainsKey("Sign-in Logs")) {
+                $signins = $userData["Sign-in Logs"] | Select-Object -First 5
+                if ($signins -and $signins.Count -gt 0) {
+                    $summaryText += "  Recent Sign-Ins:`r`n"
+                    foreach ($s in $signins) {
+                        $summaryText += "    - $($s.CreatedDateTime), App: $($s.AppDisplayName), IP: $($s.IpAddress), Status: $($s.Status), Location: $($s.CountryOrRegion), Reason: $($s.FailureReason)`r`n"
+                    }
+                } else {
+                    $summaryText += "  Recent Sign-Ins: None`r`n"
+                }
+            } else {
+                $summaryText += "  Recent Sign-Ins: Not available`r`n"
+            }
+            $summaryText += "---`r`n"
+        }
+    } else {
+        $summaryText = "No user summary data was generated. Please check the script for errors."
+    }
+    $summaryPath = Join-Path $OutputFolder "ForensicReport_Summary.txt"
+    Set-Content -Path $summaryPath -Value $summaryText -Encoding UTF8
+    Write-Host "User summary saved to: $summaryPath" -ForegroundColor Yellow
+    # Show in a pop-up window for easy copy-paste
+    Add-Type -AssemblyName System.Windows.Forms
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Forensic User Summary (Copy for Ticket)"
+    $form.Width = 800
+    $form.Height = 600
+    $form.TopMost = $true
+    $textBox = New-Object System.Windows.Forms.TextBox
+    $textBox.Multiline = $true
+    $textBox.ReadOnly = $true
+    $textBox.ScrollBars = "Vertical"
+    $textBox.Dock = "Fill"
+    $textBox.Text = $summaryText
+    $form.Controls.Add($textBox)
+    $form.ShowDialog() | Out-Null
     Write-Host "`nIndividual report generation complete!" -ForegroundColor Green
     Write-Host "Successfully generated $successCount out of $userCount reports" -ForegroundColor Yellow
     Write-Host "Reports saved to: $OutputFolder" -ForegroundColor Yellow
