@@ -1,6 +1,6 @@
-# 🔍 Entra Investigator
+# 🔍 forensictools
 
-**A comprehensive PowerShell GUI tool for investigating Microsoft Entra ID (Azure AD) accounts during security incidents, compliance audits, and user analysis.**
+**forensictools** is a suite of PowerShell tools for Microsoft Entra ID (Azure AD) investigation and reporting. Each script in this suite provides a specialized capability for security, compliance, and forensic analysis.
 
 [![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
 [![Microsoft Graph](https://img.shields.io/badge/Microsoft%20Graph%20SDK-Required-green.svg)](https://docs.microsoft.com/en-us/graph/powershell/installation)
@@ -84,9 +84,9 @@
 
 ---
 
-## 🗂️ Script Overview
+## ��️ Script Overview
 
-This toolkit includes three PowerShell scripts for Microsoft Entra ID (Azure AD) investigation and reporting:
+The **forensictools** suite includes three PowerShell scripts, each serving as a standalone tool:
 
 ### 1. `entrainvestigator.ps1`
 A GUI-based tool for interactive investigation of Entra ID accounts. Features tabbed navigation for sign-in logs, user details, audit logs, and MFA analysis. Best for hands-on, multi-user analysis and export.
